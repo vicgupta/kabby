@@ -356,7 +356,8 @@ Per-backend detail lives in `docs/backend-notes.md`.
 - Slash commands: `/models` (switch, add machines, network search/address entry,
   rename/remove/rediscover hosts), `/mode`, `/effort` (LM Studio levels read from the
   model), `/plan`, `/context`, `/compact`, `/tasks`, `/logs <id>`, `/stop <id>`,
-  `/clear`, `/help`, `/exit`.
+  `/clear`, `/stream [on|off]` (print reply tokens as they arrive; on by default;
+  off waits for the full reply and renders its markdown), `/help`, `/exit`.
 - No local server found ⇒ open the TUI early and offer network search instead of
   exiting; esc/ctrl+c while searching quits (exit 130).
 - Shell approval prompts render inline; killing signals restore the terminal from raw
@@ -603,7 +604,7 @@ backend/endpoint).
 
 1. **Close spec gaps found in the code** (as of v0.7.11):
    - `KABBY_KEEP_ALIVE` is never read, and nothing sends Ollama `keep_alive` (§3.2).
-   - The TUI implements only `/help`, `/model`, and `/exit`; §3.8 lists the full set
+   - The TUI implements only `/help`, `/model`, `/stream`, and `/exit`; §3.8 lists the full set
      (and names it `/models`).
    - `internal/detect/testdata/` does not exist yet (§5).
 2. **Human pass on the terminal TUI** — drive the logo, slash menu, shift+tab,

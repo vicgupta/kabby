@@ -260,7 +260,7 @@ func TestRenderMarkdownUsesCRLF(t *testing.T) {
 
 func TestStripInlineLeavesLiteralTextAlone(t *testing.T) {
 	cases := map[string]string{
-		"2 * 3 = 6":                             "2 * 3 = 6",
+		"2 * 3 = 6":                              "2 * 3 = 6",
 		"my_variable_name should stay untouched": "my_variable_name should stay untouched",
 		"**bold**":                               "bold",
 		"this is *important* text":               "this is important text",
@@ -330,5 +330,79 @@ func TestUnknownSlashCommandDoesNotReachModel(t *testing.T) {
 	tu.handleKey(Key{Code: "enter"})
 	if !strings.Contains(out.String(), "unknown command") {
 		t.Fatalf("expected an unknown-command reply, got %q", out.String())
+	}
+}
+
+// chunkClient replies with a fixed sequence of streamed chunks.
+type chunkClient struct {
+	chunks []string
+}
+
+func (c *chunkClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
+	ch := make(chan providers.ChatResult)
+	go func() {
+		defer close(ch)
+		for i, s := range c.chunks {
+			ch <- providers.ChatResult{Content: s, Done: i == len(c.chunks)-1}
+		}
+	}()
+	return ch, nil
+}
+
+func submitLine(tu *TUI, line string) {
+	for _, r := range line {
+		tu.edit.InsertRune(r)
+	}
+	tu.handleKey(Key{Code: "enter"})
+}
+
+func TestStreamingIsOnByDefault(t *testing.T) {
+	out := &bytes.Buffer{}
+	tu := NewTUI(bytes.NewReader(nil), out, "m", "ollama", "http://x", &chunkClient{chunks: []string{"Hel", "lo\nworld"}}, config.Config{})
+	if !tu.stream {
+		t.Fatal("expected streaming on by default")
+	}
+	submitLine(tu, "hi")
+	if !strings.Contains(out.String(), "Hello\r\nworld") {
+		t.Fatalf("expected streamed chunks with CRLF line breaks, got %q", out.String())
+	}
+}
+
+func TestSlashStreamToggles(t *testing.T) {
+	out := &bytes.Buffer{}
+	tu := NewTUI(bytes.NewReader(nil), out, "", "", "", &panicClient{t: t}, config.Config{})
+	submitLine(tu, "/stream")
+	if tu.stream || !strings.Contains(out.String(), "streaming: off") {
+		t.Fatalf("expected /stream to turn streaming off, got %q", out.String())
+	}
+	submitLine(tu, "/stream")
+	if !tu.stream || !strings.Contains(out.String(), "streaming: on") {
+		t.Fatalf("expected second /stream to turn streaming on, got %q", out.String())
+	}
+	submitLine(tu, "/stream off")
+	if tu.stream {
+		t.Fatal("expected /stream off to turn streaming off")
+	}
+	submitLine(tu, "/stream off")
+	if tu.stream {
+		t.Fatal("expected /stream off to be idempotent")
+	}
+	submitLine(tu, "/stream on")
+	if !tu.stream {
+		t.Fatal("expected /stream on to turn streaming on")
+	}
+	submitLine(tu, "/stream maybe")
+	if !strings.Contains(out.String(), "usage: /stream [on|off]") {
+		t.Fatalf("expected usage for a bad argument, got %q", out.String())
+	}
+}
+
+func TestStreamOffRendersMarkdownAfterReply(t *testing.T) {
+	out := &bytes.Buffer{}
+	tu := NewTUI(bytes.NewReader(nil), out, "m", "ollama", "http://x", &chunkClient{chunks: []string{"some **bo", "ld** text"}}, config.Config{})
+	tu.stream = false
+	submitLine(tu, "hi")
+	if !strings.Contains(out.String(), "some bold text") {
+		t.Fatalf("expected rendered markdown when streaming is off, got %q", out.String())
 	}
 }

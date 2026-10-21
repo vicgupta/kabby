@@ -22,11 +22,12 @@ import (
 
 // TUI is the terminal user interface.
 type TUI struct {
-	in   io.Reader
-	out  io.Writer
-	edit *Editor
-	mode string // "ro" | "edit" | "bypass"
-	quit bool
+	in     io.Reader
+	out    io.Writer
+	edit   *Editor
+	mode   string // "ro" | "edit" | "bypass"
+	stream bool   // print reply tokens as they arrive (toggle with /stream)
+	quit   bool
 
 	model    string
 	backend  string
@@ -58,6 +59,7 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, a agent.Cha
 		out:      out,
 		edit:     NewEditor(),
 		mode:     "edit",
+		stream:   true,
 		model:    model,
 		backend:  backend,
 		url:      url,
@@ -223,7 +225,9 @@ func (t *TUI) submit() {
 
 	// Send the prompt to the model via the agent.
 	if t.agent != nil {
-		t.write("…\r\n")
+		if !t.stream {
+			t.write("…\r\n")
+		}
 		req := providers.ChatRequest{
 			Model:         t.model,
 			Messages:      []providers.ChatMessage{{Role: "user", Content: line}},
@@ -240,16 +244,24 @@ func (t *TUI) submit() {
 		var sb strings.Builder
 		for result := range results {
 			if result.Err != nil {
-				t.write(fmt.Sprintf("error: %v\r\n", result.Err))
+				t.write(fmt.Sprintf("\r\nerror: %v\r\n", result.Err))
 				t.write("\r> ")
 				return
 			}
 			sb.WriteString(result.Content)
+			if t.stream {
+				// Raw mode has OPOST off, so bare \n would staircase.
+				t.write(strings.ReplaceAll(result.Content, "\n", "\r\n"))
+			}
 			if result.Done {
 				break
 			}
 		}
-		t.write(renderMarkdown(sb.String()) + "\r\n")
+		if t.stream {
+			t.write("\r\n")
+		} else {
+			t.write(renderMarkdown(sb.String()) + "\r\n")
+		}
 	} else {
 		t.write("(no model connected)\r\n")
 	}
@@ -269,6 +281,9 @@ func (t *TUI) handleCommand(line string) {
 	case line == "/model" || strings.HasPrefix(line, "/model "):
 		query := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 		t.write(t.handleModelCommand(query))
+	case line == "/stream" || strings.HasPrefix(line, "/stream "):
+		arg := strings.TrimSpace(strings.TrimPrefix(line, "/stream"))
+		t.write(t.handleStreamCommand(arg))
 	default:
 		t.write(fmt.Sprintf("unknown command: %s (try /help)\r\n", line))
 	}
@@ -282,6 +297,7 @@ func helpText() string {
 		"  /help          show this message",
 		"  /model         show the current model",
 		"  /model <name>  switch to a discovered model by partial name match",
+		"  /stream        toggle streaming replies (on by default); /stream on|off",
 		"  /exit, :q      quit",
 		"",
 		"Keys:",
@@ -317,6 +333,26 @@ func (t *TUI) handleModelCommand(query string) string {
 	t.backend = chosen.Backend
 	t.url = chosen.URL
 	return fmt.Sprintf("switched to model: %s (backend: %s)\r\n", t.model, t.backend)
+}
+
+// handleStreamCommand toggles streaming with no argument, or sets it
+// explicitly with "on"/"off". Streaming prints tokens as they arrive; off
+// waits for the full reply and renders its markdown.
+func (t *TUI) handleStreamCommand(arg string) string {
+	switch arg {
+	case "":
+		t.stream = !t.stream
+	case "on":
+		t.stream = true
+	case "off":
+		t.stream = false
+	default:
+		return "usage: /stream [on|off]\r\n"
+	}
+	if t.stream {
+		return "streaming: on\r\n"
+	}
+	return "streaming: off\r\n"
 }
 
 // clientForBackend builds the chat client for a discovered backend.
