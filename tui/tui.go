@@ -93,7 +93,7 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.7.7 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write(fmt.Sprintf("kabby v0.7.8 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
 	t.write("Type /help for commands, /exit to quit.\r\n")
 
 	// Print the initial prompt.
@@ -148,7 +148,7 @@ func (t *TUI) handleKey(key Key) {
 		t.submit()
 	case key.Code == "backspace":
 		if t.edit.Backspace() {
-			t.redrawLine()
+			t.write("\b \b")
 		}
 	case key.Code == "delete":
 		t.edit.DeleteRune()
@@ -199,7 +199,11 @@ func (t *TUI) submit() {
 	}
 	t.edit.AddHistory(line)
 	t.edit.Clear()
-	t.write(fmt.Sprintf("\r\n> %s\r\n", line))
+	if t.raw {
+		t.write("\r\n> ")
+	} else {
+		t.write(fmt.Sprintf("\r\n> %s\r\n", line))
+	}
 	if line == "/exit" || line == ":q" {
 		t.quit = true
 		return
