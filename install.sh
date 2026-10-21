@@ -48,16 +48,22 @@ if [ ! -w "$(dirname "$target")" ]; then
 fi
 
 echo "Downloading ${bin} -> ${target} ..."
+# Download next to the target, then rename over it. Writing into the
+# existing file instead would get the new binary killed on macOS, which
+# caches the old file's code signature.
+tmp="${target}.download.$$"
+trap 'rm -f "$tmp"' EXIT
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$target"
+  curl -fsSL "$url" -o "$tmp"
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$target" "$url"
+  wget -qO "$tmp" "$url"
 else
   echo "Neither curl nor wget is available." >&2
   exit 1
 fi
 
-chmod +x "$target"
+chmod +x "$tmp"
+mv -f "$tmp" "$target"
 
 echo ""
 echo "kabby ${VERSION} installed to ${target}"

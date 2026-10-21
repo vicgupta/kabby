@@ -47,6 +47,7 @@ var longToShort = map[string]string{
 	"verify":          "verify",
 	"verify-attempts": "verify-attempts",
 	"effort":          "effort",
+	"update":          "update",
 }
 
 func normalizeArgs(args []string) []string {
@@ -83,6 +84,7 @@ func run(args []string) int {
 	verify := flag.String("verify", "", "headless acceptance gate (requires -p)")
 	verifyAttempts := flag.Int("verify-attempts", 6, "max acceptance checks")
 	effort := flag.String("effort", "", "reasoning effort: off|low|medium|high|default")
+	update := flag.Bool("update", false, "update kabby to the latest release")
 
 	flag.CommandLine.Parse(args)
 
@@ -93,6 +95,9 @@ func run(args []string) int {
 	if *versionFlag {
 		fmt.Printf("kabby %s\n", version)
 		return 0
+	}
+	if *update {
+		return runUpdate()
 	}
 
 	// Flag validation per SPECS.md §3.11
@@ -357,6 +362,7 @@ func printHelp() {
 		{"--effort <off|low|medium|high|default>", "reasoning effort"},
 		{"--web [port]", "browser UI (default 7433)"},
 		{`-p, --print "<prompt>"`, "headless: one prompt, exit"},
+		{"--update", "update kabby to the latest release"},
 		{"-h, --help", "show help"},
 		{"-v, --version", "show version"},
 	} {
