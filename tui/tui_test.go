@@ -2,11 +2,23 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	"kabby/internal/config"
+	"kabby/internal/providers"
 )
+
+// panicClient fails the test if the agent is ever invoked -- used to prove
+// that recognized slash commands are handled locally instead of being
+// forwarded to the model.
+type panicClient struct{ t *testing.T }
+
+func (p *panicClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
+	p.t.Fatalf("agent.Chat called with %q; slash commands must not reach the model", req.Messages[len(req.Messages)-1].Content)
+	return nil, nil
+}
 
 func TestEditorInsertAndDelete(t *testing.T) {
 	e := NewEditor()
@@ -232,3 +244,91 @@ func TestTUIQuitCtrlC(t *testing.T) {
 }
 
 var _ = strings.TrimSpace
+
+// TestRenderMarkdownUsesCRLF guards against the raw-mode "staircase" bug:
+// the terminal runs with OPOST disabled, so every line break in a
+// multi-line reply must be \r\n or the cursor never returns to column 0.
+func TestRenderMarkdownUsesCRLF(t *testing.T) {
+	md := "## Commands\n\n- `/help` shows this message\n- `/model` switches model\n\nSome **bold** text.\n"
+	out := renderMarkdown(md)
+	for _, line := range strings.Split(out, "\n") {
+		if line != "" && !strings.HasSuffix(line, "\r") {
+			t.Fatalf("line %q is not \\r-terminated; it will staircase in raw mode: %q", line, out)
+		}
+	}
+}
+
+func TestStripInlineLeavesLiteralTextAlone(t *testing.T) {
+	cases := map[string]string{
+		"2 * 3 = 6":                             "2 * 3 = 6",
+		"my_variable_name should stay untouched": "my_variable_name should stay untouched",
+		"**bold**":                               "bold",
+		"this is *important* text":               "this is important text",
+		"the _word_ is nice":                     "the word is nice",
+		"use `go test ./...` to run tests":       "use go test ./... to run tests",
+	}
+	for in, want := range cases {
+		if got := stripInline(in); got != want {
+			t.Errorf("stripInline(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSlashHelpIsHandledLocally(t *testing.T) {
+	in := bytes.NewReader(nil)
+	out := &bytes.Buffer{}
+	tu := NewTUI(in, out, "", "", "", &panicClient{t: t}, config.Config{})
+	for _, r := range "/help" {
+		tu.edit.InsertRune(r)
+	}
+	tu.handleKey(Key{Code: "enter"})
+	if !strings.Contains(out.String(), "Commands:") {
+		t.Fatalf("expected /help output to list commands, got %q", out.String())
+	}
+}
+
+func TestSlashModelShowsCurrent(t *testing.T) {
+	in := bytes.NewReader(nil)
+	out := &bytes.Buffer{}
+	tu := NewTUI(in, out, "demo-model", "ollama", "http://x", &panicClient{t: t}, config.Config{})
+	for _, r := range "/model" {
+		tu.edit.InsertRune(r)
+	}
+	tu.handleKey(Key{Code: "enter"})
+	if !strings.Contains(out.String(), "demo-model") {
+		t.Fatalf("expected /model to report the current model, got %q", out.String())
+	}
+}
+
+func TestSlashModelSwitchesByPartialName(t *testing.T) {
+	in := bytes.NewReader(nil)
+	out := &bytes.Buffer{}
+	tu := NewTUI(in, out, "qwen3.5", "ollama", "http://a", &panicClient{t: t}, config.Config{})
+	tu.SetBackends([]providers.ModelInfo{
+		{ID: "qwen3.5", Name: "qwen3.5", Backend: "ollama", URL: "http://a"},
+		{ID: "gemma4:12b-mlx", Name: "gemma4:12b-mlx", Backend: "ollama", URL: "http://a"},
+	})
+	for _, r := range "/model gemma4" {
+		tu.edit.InsertRune(r)
+	}
+	tu.handleKey(Key{Code: "enter"})
+	if !strings.Contains(out.String(), "switched to model: gemma4:12b-mlx") {
+		t.Fatalf("expected /model gemma4 to switch models, got %q", out.String())
+	}
+	if tu.model != "gemma4:12b-mlx" {
+		t.Fatalf("expected tui.model updated, got %q", tu.model)
+	}
+}
+
+func TestUnknownSlashCommandDoesNotReachModel(t *testing.T) {
+	in := bytes.NewReader(nil)
+	out := &bytes.Buffer{}
+	tu := NewTUI(in, out, "", "", "", &panicClient{t: t}, config.Config{})
+	for _, r := range "/bogus" {
+		tu.edit.InsertRune(r)
+	}
+	tu.handleKey(Key{Code: "enter"})
+	if !strings.Contains(out.String(), "unknown command") {
+		t.Fatalf("expected an unknown-command reply, got %q", out.String())
+	}
+}

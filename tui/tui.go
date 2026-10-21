@@ -16,6 +16,7 @@ import (
 	kctx "kabby/internal/context"
 	"kabby/internal/plan"
 	"kabby/internal/providers"
+	"kabby/internal/session"
 	"kabby/internal/tools"
 )
 
@@ -31,6 +32,7 @@ type TUI struct {
 	backend  string
 	url      string
 	agent    agent.ChatClient
+	backends []providers.ModelInfo
 	ctxMgr   *kctx.Manager
 	toolsCtx *tools.ToolContext
 	plan     *plan.Plan
@@ -67,6 +69,12 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, a agent.Cha
 	}
 }
 
+// SetBackends records the locally discovered model backends, enabling the
+// /model command to switch between them.
+func (t *TUI) SetBackends(backends []providers.ModelInfo) {
+	t.backends = backends
+}
+
 // Run starts the TUI event loop. Returns when the user quits.
 func (t *TUI) Run() error {
 	// Put stdin into raw mode if it's a terminal, so we can read keys
@@ -93,7 +101,7 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.7.10 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write(fmt.Sprintf("kabby v0.7.11 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
 	t.write("Type /help for commands, /exit to quit.\r\n")
 
 	// Print the initial prompt.
@@ -204,8 +212,12 @@ func (t *TUI) submit() {
 	} else {
 		t.write(fmt.Sprintf("\r\n> %s\r\n", line))
 	}
-	if line == "/exit" || line == ":q" {
+	if line == ":q" {
 		t.quit = true
+		return
+	}
+	if strings.HasPrefix(line, "/") {
+		t.handleCommand(line)
 		return
 	}
 
@@ -242,6 +254,79 @@ func (t *TUI) submit() {
 		t.write("(no model connected)\r\n")
 	}
 	t.write("> ")
+}
+
+// handleCommand dispatches a slash command (the line has already been
+// confirmed to start with "/"). Unrecognized commands get an explicit
+// "unknown command" reply instead of silently being sent to the model.
+func (t *TUI) handleCommand(line string) {
+	switch {
+	case line == "/exit":
+		t.quit = true
+		return
+	case line == "/help":
+		t.write(helpText())
+	case line == "/model" || strings.HasPrefix(line, "/model "):
+		query := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
+		t.write(t.handleModelCommand(query))
+	default:
+		t.write(fmt.Sprintf("unknown command: %s (try /help)\r\n", line))
+	}
+	t.write("> ")
+}
+
+// helpText lists the TUI's slash commands and keybindings.
+func helpText() string {
+	lines := []string{
+		"Commands:",
+		"  /help          show this message",
+		"  /model         show the current model",
+		"  /model <name>  switch to a discovered model by partial name match",
+		"  /exit, :q      quit",
+		"",
+		"Keys:",
+		"  shift+tab      cycle permission mode (ro -> edit -> bypass)",
+		"  ctrl+c         quit",
+		"  ctrl+l         clear screen",
+		"  ctrl+u         clear the input line",
+	}
+	return strings.Join(lines, "\r\n") + "\r\n"
+}
+
+// handleModelCommand shows or switches the active model. With no query it
+// reports the current model; with a query it reuses the same partial-name
+// matching as the --model flag (session.PrepareModel) against the locally
+// discovered backends.
+func (t *TUI) handleModelCommand(query string) string {
+	if query == "" {
+		if t.model == "" {
+			return "(no model connected)\r\n"
+		}
+		return fmt.Sprintf("model: %s (backend: %s, %s)\r\n", t.model, t.backend, t.url)
+	}
+
+	chosen, err := session.PrepareModel(session.SessionPrefs{Model: query}, t.cfg, t.backends)
+	if err != nil {
+		return fmt.Sprintf("%v\r\n", err)
+	}
+
+	if chosen.Backend != t.backend || chosen.URL != t.url {
+		t.agent = clientForBackend(chosen.Backend, chosen.URL)
+	}
+	t.model = chosen.ID
+	t.backend = chosen.Backend
+	t.url = chosen.URL
+	return fmt.Sprintf("switched to model: %s (backend: %s)\r\n", t.model, t.backend)
+}
+
+// clientForBackend builds the chat client for a discovered backend.
+func clientForBackend(backend, url string) agent.ChatClient {
+	switch backend {
+	case "lmstudio":
+		return providers.NewLMStudio(url, providers.NewTransport())
+	default:
+		return providers.NewOllama(url, providers.NewTransport())
+	}
 }
 
 // renderMarkdown converts basic markdown to plain text suitable for a terminal.
@@ -294,17 +379,78 @@ func renderMarkdown(md string) string {
 		// Strip inline formatting markers.
 		out = append(out, stripInline(line))
 	}
-	return strings.Join(out, "\n")
+	// The TUI runs the terminal in raw mode, which disables the output
+	// post-processing (OPOST) that would otherwise translate \n to \r\n.
+	// A bare \n here only moves the cursor down a row without returning
+	// it to column 0, so every line of a multi-line reply must be joined
+	// with \r\n or it staircases to the right.
+	return strings.Join(out, "\r\n")
 }
 
-// stripInline removes bold/italic/code markers from a line of text.
+// stripInline removes markdown emphasis/code markers from a line of text.
+// Only matched delimiter pairs with markdown-style flanking are stripped,
+// so literal text that merely contains the delimiter characters -- math
+// like "2 * 3", identifiers like "my_variable_name" -- passes through
+// unchanged instead of being mangled.
 func stripInline(s string) string {
-	s = strings.ReplaceAll(s, "**", "")
-	s = strings.ReplaceAll(s, "__", "")
-	s = strings.ReplaceAll(s, "*", "")
-	s = strings.ReplaceAll(s, "_", "")
-	s = strings.ReplaceAll(s, "`", "")
+	s = stripDelimPairs(s, "`", false)
+	s = stripDelimPairs(s, "**", false)
+	s = stripDelimPairs(s, "__", true)
+	s = stripDelimPairs(s, "*", false)
+	s = stripDelimPairs(s, "_", true)
 	return s
+}
+
+// isWordByte reports whether b is a letter, digit, or underscore.
+func isWordByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// stripDelimPairs removes matched pairs of delim from s, keeping the
+// enclosed content. A delimiter can only open/close when the character
+// just inside it isn't whitespace (so "2 * 3" and "** bold **" are left
+// alone). When wordBoundary is set (the underscore emphasis rule), the
+// character just outside the delimiter additionally must not be a word
+// character, so "my_variable_name" is never treated as emphasis.
+func stripDelimPairs(s string, delim string, wordBoundary bool) string {
+	var out strings.Builder
+	n := len(s)
+	dl := len(delim)
+	i := 0
+	for i < n {
+		if i+dl <= n && s[i:i+dl] == delim {
+			insideOK := i+dl < n && s[i+dl] != ' ' && s[i+dl] != '\t'
+			outsideOK := !wordBoundary || i == 0 || !isWordByte(s[i-1])
+			if insideOK && outsideOK {
+				if closeIdx := findClose(s, delim, i+dl, wordBoundary); closeIdx != -1 {
+					out.WriteString(s[i+dl : closeIdx])
+					i = closeIdx + dl
+					continue
+				}
+			}
+		}
+		out.WriteByte(s[i])
+		i++
+	}
+	return out.String()
+}
+
+// findClose finds the next valid closing delimiter at or after from,
+// returning its index, or -1 if none is found.
+func findClose(s, delim string, from int, wordBoundary bool) int {
+	n := len(s)
+	dl := len(delim)
+	for j := from; j+dl <= n; j++ {
+		if s[j:j+dl] != delim {
+			continue
+		}
+		insideOK := s[j-1] != ' ' && s[j-1] != '\t'
+		outsideOK := !wordBoundary || j+dl == n || !isWordByte(s[j+dl])
+		if insideOK && outsideOK {
+			return j
+		}
+	}
+	return -1
 }
 
 // RunStdin runs the TUI using os.Stdin and os.Stdout with no model connected.

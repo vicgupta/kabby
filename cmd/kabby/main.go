@@ -24,7 +24,7 @@ import (
 	"kabby/tui"
 )
 
-const version = "0.7.10"
+const version = "0.7.11"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -327,6 +327,7 @@ func runTUI(workspace string, modelFlag string, ctxFlag int) int {
 	}
 
 	tuiApp := tui.NewTUI(os.Stdin, os.Stdout, chosen.ID, chosen.Backend, chosen.URL, client, cfg)
+	tuiApp.SetBackends(backends)
 	if err := tuiApp.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -334,33 +335,50 @@ func runTUI(workspace string, modelFlag string, ctxFlag int) int {
 	return 0
 }
 
+// helpRow is one "flag/env var -> description" line in the help text.
+type helpRow struct {
+	name string
+	desc string
+}
+
+// helpCol is the fixed width of the name column. Padding with spaces (not
+// tabs) keeps columns aligned regardless of the terminal's tab-stop width.
+const helpCol = 40
+
 func printHelp() {
-	fmt.Printf(`kabby %s — zero-config CLI coding agent for local models
+	fmt.Printf("kabby %s — zero-config CLI coding agent for local models\n\n", version)
+	fmt.Print("Usage:\n  kabby [workspace] [flags]\n\n")
 
-Usage:
-	kabby [workspace] [flags]
+	fmt.Print("Flags:\n")
+	for _, r := range []helpRow{
+		{"-m, --mode <ro|edit|bypass>", "permission mode"},
+		{"--model <name>", "pick model by partial name"},
+		{"--ctx <tokens>", "force context window (>=1024)"},
+		{"--verify <command>", "headless acceptance gate (requires -p)"},
+		{"--verify-attempts <n>", "max acceptance checks (default 6)"},
+		{"--effort <off|low|medium|high|default>", "reasoning effort"},
+		{"--web [port]", "browser UI (default 7433)"},
+		{`-p, --print "<prompt>"`, "headless: one prompt, exit"},
+		{"-h, --help", "show help"},
+		{"-v, --version", "show version"},
+	} {
+		printHelpRow(r)
+	}
 
-Flags:
-	-m, --mode <ro|edit|bypass>	permission mode
-	--model <name>		pick model by partial name
-	--ctx <tokens>		force context window (>=1024)
-	--verify <command>	headless acceptance gate (requires -p)
-	--verify-attempts <n>	max acceptance checks (default 6)
-	--effort <off|low|medium|high|default>
-				reasoning effort
-	--web [port]		browser UI (default 7433)
-	-p, --print "<prompt>"	headless: one prompt, exit
-	-h, --help		show help
-	-v, --version		show version
+	fmt.Print("\nEnv:\n")
+	for _, r := range []helpRow{
+		{"KABBY_CONFIG", "alternate config path for tests"},
+		{"KABBY_KEEP_ALIVE", "Ollama keep-alive override (minutes)"},
+		{"OLLAMA_HOST", "Ollama base URL"},
+		{"OMLX_API_KEY / MTPLX_API_KEY", "fallback API keys"},
+	} {
+		printHelpRow(r)
+	}
+	fmt.Println()
+}
 
-Env:
-	KABBY_CONFIG		alternate config path for tests
-	KABBY_KEEP_ALIVE	Ollama keep-alive override (minutes)
-	OLLAMA_HOST		Ollama base URL
-	OMLX_API_KEY / MTPLX_API_KEY
-				fallback API keys
-
-`, version)
+func printHelpRow(r helpRow) {
+	fmt.Printf("  %-*s%s\n", helpCol, r.name, r.desc)
 }
 
 // stubChatClient is a temporary stub used until real provider wiring is done.
