@@ -680,10 +680,9 @@ backend/endpoint).
 
 ### 7.1 Proposed features
 
-Each item is adapted to kabby's goals (small local models, zero
-config, privacy). None is implemented yet. Suggested order: F5 → F4 → F2 → the
-TUI/agent-loop gap in item 1 → F1 → F3, then the rest as needed. F1, F3, and F7 depend
-on the TUI running through the agent loop.
+Each item is adapted to kabby's goals (small local models, zero config, privacy).
+None is implemented yet. Suggested order: F5 → F4 → F2 → F1 → F3, then the rest as
+needed.
 
 **Strong fits**
 
@@ -733,8 +732,7 @@ on the TUI running through the agent loop.
 
 **Considered and rejected**
 
-- Chat-app channels, cloud providers, OAuth: conflict with the local-only privacy
-  goal (§1.3).
+- Chat-app channels: conflict with the local-first privacy goal (§1.3).
 - Subagents: a §1.4 non-goal.
 - Self-evolution (auto-written skills from past turns): with small models, an easy
   path for bad instructions to persist in the prompt.
