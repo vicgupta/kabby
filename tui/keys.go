@@ -65,6 +65,12 @@ func ParseKey(data []byte) (Key, []byte, bool) {
 		return Key{Code: "escape"}, data[1:], true
 	}
 
+	// DEL (0x7f) is the backspace key on most terminals. It is not < 0x20,
+	// so it must be checked before the control-character branch.
+	if data[0] == 0x7f {
+		return Key{Code: "backspace"}, data[1:], true
+	}
+
 	// Control characters.
 	if data[0] < 0x20 {
 		switch data[0] {

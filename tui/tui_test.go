@@ -145,6 +145,25 @@ func TestKeyParse(t *testing.T) {
 	if key.Rune != 'h' {
 		t.Fatalf("expected 'h', got %c", key.Rune)
 	}
+
+	// 0x7f (DEL) is the backspace key in raw mode. It must NOT be treated
+	// as a printable rune.
+	key, rest, ok = ParseKey([]byte{0x7f})
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if key.Code != "backspace" {
+		t.Fatalf("expected 'backspace' for 0x7f, got code=%q rune=%c", key.Code, key.Rune)
+	}
+	if len(rest) != 0 {
+		t.Fatal("expected no rest")
+	}
+
+	// 0x08 (BS) is also backspace.
+	key, _, ok = ParseKey([]byte{0x08})
+	if !ok || key.Code != "backspace" {
+		t.Fatalf("expected 'backspace' for 0x08, got code=%q ok=%v", key.Code, ok)
+	}
 }
 
 func TestTUIModeCycle(t *testing.T) {
