@@ -158,7 +158,7 @@ func discoverBackends(cfg config.Config) []providers.ModelInfo {
 				Backend:        r.Backend,
 				URL:            r.URL,
 				ToolsSupported: true,
-				ContextWindow:  4096,
+				ContextWindow:  providers.DefaultContextWindow,
 			})
 		}
 	}

@@ -60,7 +60,7 @@ func (l *LMStudio) ListModels(ctx context.Context) ([]ModelInfo, error) {
 			Backend:        "lmstudio",
 			URL:            l.baseURL,
 			ToolsSupported: true,
-			ContextWindow:  4096,
+			ContextWindow:  DefaultContextWindow,
 		})
 	}
 	return out, nil

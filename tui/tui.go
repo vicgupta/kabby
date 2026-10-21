@@ -83,7 +83,7 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, client agen
 		TaskManager:     tools.NewTaskManager(),
 		Plan:            t.plan,
 	}
-	t.ctxMgr = kctx.NewManager(4096)
+	t.ctxMgr = kctx.NewManager(providers.DefaultContextWindow)
 	t.agent = agent.NewAgent(client, t.ctxMgr, t.plan, t.toolsCtx, cfg)
 	t.agent.Observer = agent.Observer{
 		OnText:       t.onText,
@@ -92,7 +92,7 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, client agen
 		OnNotice:     func(s string) { t.writeLine(s) },
 		Approve:      t.approve,
 	}
-	t.SetModel(providers.ModelInfo{ID: model, Name: model, Backend: backend, URL: url, ToolsSupported: true, ContextWindow: 4096}, client)
+	t.SetModel(providers.ModelInfo{ID: model, Name: model, Backend: backend, URL: url, ToolsSupported: true, ContextWindow: providers.DefaultContextWindow}, client)
 	return t
 }
 
@@ -104,7 +104,7 @@ func (t *TUI) SetModel(m providers.ModelInfo, client agent.ChatClient) {
 	t.client = client
 	window := m.ContextWindow
 	if window <= 0 {
-		window = 4096
+		window = providers.DefaultContextWindow
 	}
 	t.ctxMgr = kctx.NewManager(window)
 	t.agent.CtxManager = t.ctxMgr

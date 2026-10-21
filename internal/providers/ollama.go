@@ -61,8 +61,8 @@ func (o *Ollama) ListModels(ctx context.Context) ([]ModelInfo, error) {
 			Name:           m.Name,
 			Backend:        "ollama",
 			URL:            o.baseURL,
-			ToolsSupported: true, // assume tool support; refined at chat time
-			ContextWindow:  4096, // default; refined via /api/ps
+			ToolsSupported: true,                 // assume tool support; refined at chat time
+			ContextWindow:  DefaultContextWindow, // default; refined via /api/ps
 		})
 	}
 	return models, nil

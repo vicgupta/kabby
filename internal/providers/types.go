@@ -31,6 +31,10 @@ type ToolSpec struct {
 	Parameters  any    `json:"parameters"` // flat schema (no nested objects/arrays)
 }
 
+// DefaultContextWindow is the window assumed for a local model when the
+// backend does not report one and no --ctx is given.
+const DefaultContextWindow = 64 * 1024
+
 // ModelInfo describes a discovered model.
 type ModelInfo struct {
 	ID              string
