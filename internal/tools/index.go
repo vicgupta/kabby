@@ -6,82 +6,158 @@ import (
 	"kabby/internal/providers"
 )
 
+// prop is one flat JSON Schema property.
+func prop(typ, desc string) map[string]any {
+	return map[string]any{"type": typ, "description": desc}
+}
+
+// schema builds a flat JSON Schema object (no nested objects or arrays).
+func schema(props map[string]any, required ...string) map[string]any {
+	if required == nil {
+		required = []string{}
+	}
+	return map[string]any{"type": "object", "properties": props, "required": required}
+}
+
+// readTools and writeTools are the two tiers. Every description carries an
+// example call, which small models follow far more reliably than prose.
+var readTools = []providers.ToolSpec{
+	{
+		Name:        "read_file",
+		Description: "Read a portion of a file. Example: read_file(path=\"src/main.go\", offset=0, limit=50). Returns file contents with a continuation line if more remains.",
+		Parameters: schema(map[string]any{
+			"path":   prop("string", "file path relative to workspace"),
+			"offset": prop("integer", "starting line number (default 0)"),
+			"limit":  prop("integer", "lines to read (default 50, max 200)"),
+		}, "path"),
+	},
+	{
+		Name:        "list_files",
+		Description: "List a directory. Example: list_files(path=\"src\"). Folders end with '/'.",
+		Parameters: schema(map[string]any{
+			"path": prop("string", "directory path relative to workspace (default \".\")"),
+		}),
+	},
+	{
+		Name:        "search",
+		Description: "Search for text in files. Example: search(pattern=\"func main\", path=\"src\"). Bounded results.",
+		Parameters: schema(map[string]any{
+			"pattern": prop("string", "text or regex to search for"),
+			"path":    prop("string", "directory to search (default \".\")"),
+		}, "pattern"),
+	},
+	{
+		Name:        "plan",
+		Description: "Manage the agent plan. Example: plan(action=\"set\", steps=\"write a function; add tests\"). Actions: set, done, add, show, checkpoint.",
+		Parameters: schema(map[string]any{
+			"action": prop("string", "set|done|add|show|checkpoint"),
+			"steps":  prop("string", "newline or semicolon separated steps (set, add)"),
+			"note":   prop("string", "checkpoint note, 1-1000 chars"),
+			"step":   prop("integer", "step number for done (default: current step)"),
+		}, "action"),
+	},
+}
+
+var writeTools = []providers.ToolSpec{
+	{
+		Name:        "write_file",
+		Description: "Create or overwrite a file. Example: write_file(path=\"src/foo.go\", content=\"package main\\n\"). Creates parent directories.",
+		Parameters: schema(map[string]any{
+			"path":    prop("string", "file path relative to workspace"),
+			"content": prop("string", "file contents"),
+		}, "path", "content"),
+	},
+	{
+		Name:        "edit_file",
+		Description: "Replace exact old_text with new_text. Example: edit_file(path=\"src/foo.go\", old_text=\"foo\", new_text=\"bar\"). Fails if old_text is not found or appears multiple times.",
+		Parameters: schema(map[string]any{
+			"path":     prop("string", "file path relative to workspace"),
+			"old_text": prop("string", "exact text to replace"),
+			"new_text": prop("string", "replacement text"),
+		}, "path", "old_text", "new_text"),
+	},
+	{
+		Name:        "run_command",
+		Description: "Run a shell command inside the workspace. Example: run_command(command=\"go test ./...\"). Waits up to 120s.",
+		Parameters: schema(map[string]any{
+			"command": prop("string", "shell command to run"),
+		}, "command"),
+	},
+	{
+		Name:        "task",
+		Description: "Start a background process. Example: task(command=\"npm run dev\"). Returns a task ID for logs/stop.",
+		Parameters: schema(map[string]any{
+			"command": prop("string", "shell command to run in background"),
+		}, "command"),
+	},
+}
+
 // BuildToolSpecs returns the four read-only tools for ro mode, plus the four
 // write/exec tools for edit/bypass mode.
 func BuildToolSpecs(mode providers.Mode) []providers.ToolSpec {
-	specs := []providers.ToolSpec{
-		{
-			Name:        "read_file",
-			Description: "Read a portion of a file. Example: read_file(path=\"src/main.go\", offset=0, limit=50). Returns file contents with a continuation line if more remains.",
-			Parameters: map[string]any{
-				"path":   "string (required) - file path relative to workspace",
-				"offset": "number (optional, default 0) - starting line number",
-				"limit":  "number (optional, default 50, max 200) - lines to read",
-			},
-		},
-		{
-			Name:        "list_files",
-			Description: "List a directory. Example: list_files(path=\"src\"). Folders end with '/'.",
-			Parameters: map[string]any{
-				"path": "string (optional, default \".\") - directory path relative to workspace",
-			},
-		},
-		{
-			Name:        "search",
-			Description: "Search for text in files. Example: search(pattern=\"func main\", path=\"src\"). Bounded results.",
-			Parameters: map[string]any{
-				"pattern": "string (required) - text or regex to search for",
-				"path":    "string (optional, default \".\") - directory to search",
-			},
-		},
-		{
-			Name:        "plan",
-			Description: "Manage the agent plan. Example: plan(action=\"set\", steps=\"write a function; add tests\"). Actions: set, done, add, show, checkpoint.",
-			Parameters: map[string]any{
-				"action": "string (required) - set|done|add|show|checkpoint",
-				"steps":  "string (optional) - newline or semicolon separated steps",
-				"note":   "string (optional, 1-1000 chars) - checkpoint note",
-				"step":   "number (optional) - step number for done/checkpoint",
-			},
-		},
-	}
-
+	specs := append([]providers.ToolSpec{}, readTools...)
 	if mode == providers.ModeEdit || mode == providers.ModeBypass {
-		specs = append(specs, []providers.ToolSpec{
-			{
-				Name:        "write_file",
-				Description: "Create or overwrite a file. Example: write_file(path=\"src/foo.go\", content=\"package main\\n\"). Creates parent directories.",
-				Parameters: map[string]any{
-					"path:":   "string (required) - file path relative to workspace",
-					"content": "string (required) - file contents",
-				},
-			},
-			{
-				Name:        "edit_file",
-				Description: "Replace exact old_text with new_text. Example: edit_file(path=\"src/foo.go\", old_text=\"foo\", new_text=\"bar\"). Fails if old_text is not found or appears multiple times.",
-				Parameters: map[string]any{
-					"path":     "string (required) - file path relative to workspace",
-					"old_text": "string (required) - exact text to replace",
-					"new_text": "string (required) - replacement text",
-				},
-			},
-			{
-				Name:        "run_command",
-				Description: "Run a shell command inside the workspace. Example: run_command(command=\"go test ./...\"). Waits up to 120s.",
-				Parameters: map[string]any{
-					"command": "string (required) - shell command to run",
-				},
-			},
-			{
-				Name:        "task",
-				Description: "Start a background process. Example: task(command=\"npm run dev\"). Returns a task ID for logs/stop.",
-				Parameters: map[string]any{
-					"command": "string (required) - shell command to run in background",
-				},
-			},
-		}...)
+		specs = append(specs, writeTools...)
 	}
 	return specs
+}
+
+// IsWriteTool reports whether name writes files or runs commands, and so is
+// refused in ro mode.
+func IsWriteTool(name string) bool {
+	for _, t := range writeTools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateArgs checks a call's arguments against the tool's schema: required
+// parameters present and every value of its declared type. It returns a
+// message for the model, or "" when the call is valid.
+func ValidateArgs(name string, args map[string]any) string {
+	var spec *providers.ToolSpec
+	for _, list := range [][]providers.ToolSpec{readTools, writeTools} {
+		for i := range list {
+			if list[i].Name == name {
+				spec = &list[i]
+			}
+		}
+	}
+	if spec == nil {
+		return fmt.Sprintf("unknown tool %q", name)
+	}
+	sch := spec.Parameters.(map[string]any)
+	for _, req := range sch["required"].([]string) {
+		if _, ok := args[req]; !ok {
+			return fmt.Sprintf("%s needs %q. %s", name, req, spec.Description)
+		}
+	}
+	for key, v := range args {
+		p, ok := sch["properties"].(map[string]any)[key].(map[string]any)
+		if !ok {
+			continue // extra arguments are ignored
+		}
+		switch p["type"] {
+		case "string":
+			if _, ok := v.(string); !ok {
+				return fmt.Sprintf("%s: %q must be a string", name, key)
+			}
+		case "integer":
+			switch n := v.(type) {
+			case float64:
+				if n != float64(int(n)) {
+					return fmt.Sprintf("%s: %q must be a whole number", name, key)
+				}
+			case int, string:
+				// strings like "3" are accepted by the tools themselves
+			default:
+				return fmt.Sprintf("%s: %q must be a number", name, key)
+			}
+		}
+	}
+	return ""
 }
 
 // ExecuteTool dispatches a tool call by name. signal allows cancellation.

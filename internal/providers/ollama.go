@@ -74,6 +74,7 @@ type chatRequest struct {
 	Messages []chatMsg `json:"messages"`
 	Tools    []toolDef `json:"tools,omitempty"`
 	Stream   bool      `json:"stream"`
+	Think    *bool     `json:"think,omitempty"` // false when effort is off
 	Options  chatOpts  `json:"options"`
 }
 
@@ -81,6 +82,7 @@ type chatMsg struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+	ToolName  string     `json:"tool_name,omitempty"` // on role "tool"
 }
 
 type toolDef struct {
@@ -98,8 +100,6 @@ type chatOpts struct {
 	NumCtx      int     `json:"num_ctx,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"top_p,omitempty"`
-	// NoThink maps to effort=off for Ollama.
-	NoThink bool `json:"-"` // handled via options map below
 }
 
 // chatResponse is one line of the /api/chat NDJSON stream.
@@ -112,10 +112,12 @@ type chatResponse struct {
 	TotalDuration   int64   `json:"total_duration"`
 	PromptEvalCount int     `json:"prompt_eval_count"`
 	EvalCount       int     `json:"eval_count"`
+	Error           string  `json:"error"`
 }
 
 // Chat streams a chat completion. Each line of the NDJSON stream is parsed
-// into a ChatResult sent to the results channel.
+// into a ChatResult sent to the results channel. Ollama does not assign
+// tool-call IDs, so calls are numbered here.
 func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, error) {
 	payload := chatRequest{
 		Model:  req.Model,
@@ -127,11 +129,12 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 		},
 	}
 	if req.Effort == EffortOff {
-		payload.Options.NoThink = true
+		think := false
+		payload.Think = &think
 	}
 
 	for _, m := range req.Messages {
-		msg := chatMsg{Role: m.Role, Content: m.Content}
+		msg := chatMsg{Role: m.Role, Content: m.Content, ToolName: m.ToolName}
 		for _, tc := range m.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, toolCall{Function: toolCallFunc{Name: tc.Name, Arguments: tc.Arguments}})
 		}
@@ -162,7 +165,11 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 
 	resp, err := o.transport.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("ollama chat: %v", err)
+		return nil, fmt.Errorf("ollama chat: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("ollama chat: status %d: %s", resp.StatusCode, strings.TrimSpace(string(drainBody(resp.Body))))
 	}
 
 	results := make(chan ChatResult, 8)
@@ -173,6 +180,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 4*1024*1024) // 4MB max line
 
+		callN := 0
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
@@ -189,7 +197,11 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 			var cr chatResponse
 			if err := json.Unmarshal([]byte(line), &cr); err != nil {
 				results <- ChatResult{Err: fmt.Errorf("ollama decode stream line: %v", err)}
-				continue
+				return
+			}
+			if cr.Error != "" {
+				results <- ChatResult{Err: fmt.Errorf("ollama: %s", cr.Error)}
+				return
 			}
 
 			result := ChatResult{
@@ -202,7 +214,9 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 				if m, ok := tc.Function.Arguments.(map[string]any); ok {
 					args = m
 				}
+				callN++
 				result.ToolCalls = append(result.ToolCalls, ToolCall{
+					ID:        fmt.Sprintf("call_%d", callN),
 					Name:      tc.Function.Name,
 					Arguments: args,
 				})
@@ -219,6 +233,11 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, 
 				return
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			results <- ChatResult{Err: fmt.Errorf("ollama stream: %v", err)}
+			return
+		}
+		results <- ChatResult{Err: ErrStreamCut}
 	}()
 
 	return results, nil
@@ -249,39 +268,6 @@ type ollamaProcess struct {
 	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	NumCtx int    `json:"num_ctx"`
-}
-
-// ChatRequest is a generic chat request.
-type ChatRequest struct {
-	Model         string
-	Messages      []ChatMessage
-	Tools         []ToolSpec
-	ContextWindow int
-	Effort        Effort
-}
-
-// ChatMessage is a generic chat message.
-type ChatMessage struct {
-	Role      string
-	Content   string
-	ToolCalls []ToolCall
-}
-
-// ToolCall is a generic tool call.
-type ToolCall struct {
-	Name      string
-	Arguments map[string]any
-}
-
-// ChatResult is a generic chat result.
-type ChatResult struct {
-	Content         string
-	ToolCalls       []ToolCall
-	Done            bool
-	DoneReason      string
-	EvalCount       int
-	PromptEvalCount int
-	Err             error
 }
 
 type toolCallFunc struct {

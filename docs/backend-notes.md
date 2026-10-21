@@ -33,3 +33,23 @@
 - ≤3 transient retries with cancellable backoff
 - One context-overflow recovery via forced compaction
 - No partial tool-call execution on truncated streams
+
+## Anthropic (hosted, opt-in)
+
+- Official Go SDK (`anthropic-sdk-go`), streaming; select with `--model anthropic/<id>`
+- Credentials: `providerKeys.anthropic` in `~/.kabby.json`, else the SDK's lookup
+  (`ANTHROPIC_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → `ant auth login` profile)
+- Effort → `output_config.effort`; thinking left at the model default (adaptive)
+- Server-side refusal fallback (`fallbacks: "default"`) on models that support it
+- Conversation kept append-only (fixed tools and system prompt, native replay) so
+  thinking blocks stay valid
+
+## OpenAI (hosted, opt-in)
+
+- Shared OpenAI-compatible client (same as LM Studio); select with `--model openai/<id>`
+- `OPENAI_API_KEY` or `providerKeys.openai`; `OPENAI_BASE_URL` overrides the endpoint
+
+## Key rotation (hosted)
+
+- Rate-limit, billing and auth errors cool a key down and move to the next one
+- Optional per-key requests-per-minute cap: `rpm.<provider>` in `~/.kabby.json`

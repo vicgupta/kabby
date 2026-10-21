@@ -7,10 +7,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"kabby/internal/agent"
@@ -18,6 +21,7 @@ import (
 	ctxmgr "kabby/internal/context"
 	"kabby/internal/detect"
 	"kabby/internal/plan"
+	sysprompt "kabby/internal/prompt"
 	"kabby/internal/providers"
 	"kabby/internal/session"
 	"kabby/internal/tools"
@@ -80,9 +84,6 @@ func run(args []string) int {
 	verifyAttempts := flag.Int("verify-attempts", 6, "max acceptance checks")
 	effort := flag.String("effort", "", "reasoning effort: off|low|medium|high|default")
 
-	_ = mode
-	_ = effort
-
 	flag.CommandLine.Parse(args)
 
 	if *help {
@@ -118,9 +119,9 @@ func run(args []string) int {
 	case *web != "":
 		return runWeb(*web, workspace)
 	case *print != "":
-		return runHeadless(*print, workspace, *model, *verify, *ctx, *verifyAttempts)
+		return runHeadless(*print, workspace, *model, *mode, *effort, *verify, *ctx, *verifyAttempts)
 	default:
-		return runTUI(workspace, *model, *ctx)
+		return runTUI(workspace, *model, *mode, *effort, *ctx)
 	}
 }
 
@@ -130,101 +131,141 @@ func runWeb(port, workspace string) int {
 	return 0
 }
 
-// runHeadless runs one prompt and exits.
-func runHeadless(prompt, workspace, modelFlag, verify string, ctxFlag int, attempts int) int {
-	// Load config (respects KABBY_CONFIG).
+// discoverBackends finds local model servers (never sweeping the network)
+// and adds hosted models for providers with credentials.
+func discoverBackends(cfg config.Config) []providers.ModelInfo {
+	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var backends []providers.ModelInfo
+	for _, r := range detect.DiscoverLocal(reqCtx) {
+		if r.Backend == "" {
+			continue
+		}
+		models := r.Models
+		if len(models) == 0 {
+			models = []string{r.URL} // fallback to URL
+		}
+		for _, m := range models {
+			backends = append(backends, providers.ModelInfo{
+				ID:             m,
+				Name:           m,
+				Backend:        r.Backend,
+				URL:            r.URL,
+				ToolsSupported: true,
+				ContextWindow:  4096,
+			})
+		}
+	}
+	return append(backends, session.CloudModels(cfg)...)
+}
+
+// loadSession loads config, applies the mode flag, and picks a model.
+func loadSession(modelFlag, modeFlag string, ctxFlag int) (config.Config, []providers.ModelInfo, *providers.ModelInfo, error) {
 	config.SetConfigPath(os.Getenv("KABBY_CONFIG"))
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: config: %v\n", err)
-		return 1
+		return cfg, nil, nil, fmt.Errorf("config: %v", err)
+	}
+	switch modeFlag {
+	case "":
+	case "ro", "edit", "bypass":
+		cfg.LastMode = modeFlag
+	default:
+		return cfg, nil, nil, fmt.Errorf("--mode must be ro, edit, or bypass")
 	}
 
-	// Discover local servers only (headless never sweeps network).
-	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	results := detect.DiscoverLocal(reqCtx)
-
-	var backends []providers.ModelInfo
-	for _, r := range results {
-		if r.Backend != "" {
-			models := r.Models
-			if len(models) == 0 {
-				models = []string{r.URL} // fallback to URL
-			}
-			for _, m := range models {
-				backends = append(backends, providers.ModelInfo{
-					ID:             m,
-					Name:           m,
-					Backend:        r.Backend,
-					URL:            r.URL,
-					ToolsSupported: true,
-					ContextWindow:  4096,
-				})
-			}
-		}
-	}
-
-	if len(backends) == 0 {
-		fmt.Fprintln(os.Stderr, "error: "+session.NoBackendsMessage())
-		return 1
-	}
-
-	// Select model.
-	chosen, err := session.PrepareModel(session.SessionPrefs{
-		Model: modelFlag,
-		CTX:   ctxFlag,
-	}, cfg, backends)
+	backends := discoverBackends(cfg)
+	chosen, err := session.PrepareModel(session.SessionPrefs{Model: modelFlag, CTX: ctxFlag}, cfg, backends)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return cfg, backends, nil, err
+	}
+	if ctxFlag > 0 {
+		chosen.ContextWindow = ctxFlag
+	}
+	return cfg, backends, chosen, nil
+}
+
+// parseEffort validates the --effort flag.
+func parseEffort(s string) (providers.Effort, error) {
+	switch s {
+	case "", "default":
+		return providers.EffortDefault, nil
+	case "off", "low", "medium", "high":
+		return providers.Effort(s), nil
+	}
+	return "", fmt.Errorf("--effort must be off, low, medium, high, or default")
+}
+
+// runHeadless runs one prompt and exits.
+func runHeadless(prompt, workspace, modelFlag, modeFlag, effortFlag, verify string, ctxFlag int, attempts int) int {
+	effort, err := parseEffort(effortFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	cfg, _, chosen, err := loadSession(modelFlag, modeFlag, ctxFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-
-	// Build context manager.
-	window := chosen.ContextWindow
-	if ctxFlag > 0 {
-		window = ctxFlag
+	if verify != "" && !chosen.ToolsSupported {
+		fmt.Fprintf(os.Stderr, "error: %s has no tool support, so --verify cannot repair anything\n", chosen.ID)
+		return 1
 	}
-	ctxManager := ctxmgr.NewManager(window)
+	if chosen.Cloud {
+		fmt.Fprintf(os.Stderr, "kabby: hosted model %s; prompts and file contents are sent to %s\n", chosen.ID, chosen.URL)
+	}
 
-	// Build tool context.
 	tc := &tools.ToolContext{
 		Workspace:       workspace,
 		ResultCharLimit: 10000,
 		TaskManager:     tools.NewTaskManager(),
-		Plan:            plan.New(),
+	}
+	defer tc.TaskManager.KillAll()
+	a := agent.NewAgent(session.NewClient(*chosen, cfg), ctxmgr.NewManager(chosen.ContextWindow), plan.New(), tc, cfg)
+	a.Model = chosen.ID
+	a.Backend = chosen.Backend
+	a.Effort = effort
+	a.ChatOnly = !chosen.ToolsSupported
+	a.StablePrefix = chosen.Cloud
+	a.Observer.OnToolCall = func(name string, args map[string]any) {
+		fmt.Fprintf(os.Stderr, "· %s\n", name)
 	}
 
-	// Create agent with a stub client (real provider wiring in Phase 12+).
-	a := agent.NewAgent(&stubChatClient{}, ctxManager, plan.New(), tc, cfg)
-
-	start := time.Now()
-	answer, err := a.RunTurn(reqCtx, "You are a helpful coding agent.", prompt)
-	stats := agent.TurnStats{
-		ToolsCalled: 0,
-		DurationMs:  int(time.Since(start).Milliseconds()),
-		Verified:    false,
+	sys := sysprompt.SystemPrompt(cfg.LastMode)
+	switch {
+	case !chosen.ToolsSupported:
+		sys = sysprompt.ChatOnlyPrompt()
+	case chosen.Cloud:
+		sys = sysprompt.SystemPrompt("edit")
 	}
+	sys = sysprompt.InjectAGENTSMD(sys, workspace)
 
-	// Emit [stats] line on stderr.
-	statsJSON, _ := json.Marshal(stats)
-	fmt.Fprintf(os.Stderr, "[stats] %s\n", statsJSON)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	answer, err := a.RunTurn(ctx, sys, prompt)
+	stats := a.LastStats
 
 	if err != nil {
+		statsJSON, _ := json.Marshal(stats)
+		fmt.Fprintf(os.Stderr, "[stats] %s\n", statsJSON)
+		if errors.Is(err, context.Canceled) {
+			return 130
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 
 	// Acceptance gate (--verify).
 	if verify != "" {
-		passed := runVerify(verify, workspace, attempts)
-		stats.Verified = passed
-		statsJSON, _ = json.Marshal(stats)
-		fmt.Fprintf(os.Stderr, "[stats] %s\n", statsJSON)
-		if !passed {
-			fmt.Fprintf(os.Stderr, "error: acceptance gate failed: %s\n", verify)
-			return 1
-		}
+		stats.Verified = runVerify(verify, workspace, attempts)
+	}
+	statsJSON, _ := json.Marshal(stats)
+	fmt.Fprintf(os.Stderr, "[stats] %s\n", statsJSON)
+	if verify != "" && !stats.Verified {
+		fmt.Fprintf(os.Stderr, "error: acceptance gate failed: %s\n", verify)
+		return 1
 	}
 
 	fmt.Println(answer)
@@ -264,69 +305,26 @@ func runCommandSimple(cmd, workspace string) bool {
 
 // runTUI starts the raw-mode terminal UI, discovers local model servers,
 // assigns a default model, and connects the TUI to the agent loop.
-func runTUI(workspace string, modelFlag string, ctxFlag int) int {
-	// Load config (respects KABBY_CONFIG).
-	config.SetConfigPath(os.Getenv("KABBY_CONFIG"))
-	cfg, err := config.LoadConfig()
+func runTUI(workspace, modelFlag, modeFlag, effortFlag string, ctxFlag int) int {
+	effort, err := parseEffort(effortFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: config: %v\n", err)
-		return 1
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
 	}
-
-	// Discover local servers (TUI never sweeps network).
-	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	results := detect.DiscoverLocal(reqCtx)
-
-	var backends []providers.ModelInfo
-	for _, r := range results {
-		if r.Backend != "" {
-			models := r.Models
-			if len(models) == 0 {
-				models = []string{r.URL} // fallback to URL
-			}
-			for _, m := range models {
-				backends = append(backends, providers.ModelInfo{
-					ID:             m,
-					Name:           m,
-					Backend:        r.Backend,
-					URL:            r.URL,
-					ToolsSupported: true,
-					ContextWindow:  4096,
-				})
-			}
-		}
-	}
-
-	if len(backends) == 0 {
-		fmt.Fprintln(os.Stderr, "error: "+session.NoBackendsMessage())
-		return 1
-	}
-
-	// Select model: use lastModel+lastModelUrl if it matches, else first backend.
-	chosen, err := session.PrepareModel(session.SessionPrefs{
-		Model: modelFlag,
-		CTX:   ctxFlag,
-	}, cfg, backends)
+	cfg, backends, chosen, err := loadSession(modelFlag, modeFlag, ctxFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
 
-	fmt.Fprintf(os.Stderr, "kabby: discovered %s at %s, model %s\n", chosen.Backend, chosen.URL, chosen.ID)
+	fmt.Fprintf(os.Stderr, "kabby: using %s at %s, model %s\n", chosen.Backend, chosen.URL, chosen.ID)
 
-	// Build a real provider client for the discovered backend.
-	var client agent.ChatClient
-	switch chosen.Backend {
-	case "ollama":
-		client = providers.NewOllama(chosen.URL, providers.NewTransport())
-	case "lmstudio":
-		client = providers.NewLMStudio(chosen.URL, providers.NewTransport())
-	default:
-		client = providers.NewOllama(chosen.URL, providers.NewTransport())
-	}
-
+	client := session.NewClient(*chosen, cfg)
 	tuiApp := tui.NewTUI(os.Stdin, os.Stdout, chosen.ID, chosen.Backend, chosen.URL, client, cfg)
+	tuiApp.SetModel(*chosen, client)
+	tuiApp.SetWorkspace(workspace)
+	tuiApp.SetMode(cfg.LastMode)
+	tuiApp.SetEffort(effort)
 	tuiApp.SetBackends(backends)
 	if err := tuiApp.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -352,7 +350,7 @@ func printHelp() {
 	fmt.Print("Flags:\n")
 	for _, r := range []helpRow{
 		{"-m, --mode <ro|edit|bypass>", "permission mode"},
-		{"--model <name>", "pick model by partial name"},
+		{"--model <name>", "pick model by partial name, or anthropic/<id>, openai/<id>"},
 		{"--ctx <tokens>", "force context window (>=1024)"},
 		{"--verify <command>", "headless acceptance gate (requires -p)"},
 		{"--verify-attempts <n>", "max acceptance checks (default 6)"},
@@ -371,6 +369,8 @@ func printHelp() {
 		{"KABBY_KEEP_ALIVE", "Ollama keep-alive override (minutes)"},
 		{"OLLAMA_HOST", "Ollama base URL"},
 		{"OMLX_API_KEY / MTPLX_API_KEY", "fallback API keys"},
+		{"ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN", "Claude API key or OAuth token (or `ant auth login`)"},
+		{"OPENAI_API_KEY / OPENAI_BASE_URL", "OpenAI API key and optional endpoint"},
 	} {
 		printHelpRow(r)
 	}
@@ -379,14 +379,4 @@ func printHelp() {
 
 func printHelpRow(r helpRow) {
 	fmt.Printf("  %-*s%s\n", helpCol, r.name, r.desc)
-}
-
-// stubChatClient is a temporary stub used until real provider wiring is done.
-type stubChatClient struct{}
-
-func (s *stubChatClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
-	out := make(chan providers.ChatResult, 1)
-	out <- providers.ChatResult{Content: "stub response: " + req.Messages[len(req.Messages)-1].Content, Done: true}
-	close(out)
-	return out, nil
 }

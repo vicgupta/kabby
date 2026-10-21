@@ -16,20 +16,27 @@ type SessionPrefs struct {
 	Effort *providers.Effort
 }
 
-// PrepareModel selects a backend and model by partial name from the discovered
-// backends. Returns the chosen model info or an error if no suitable backend
-// is found.
+// PrepareModel selects a model from the discovered backends: by partial
+// name when one is requested, else the remembered model, else the first
+// tool-capable local model. Hosted (Cloud) models are chosen only by name
+// or by memory, never as the default. A name like "anthropic/<id>" or
+// "openai/<id>" selects that hosted model even if it is not listed.
 func PrepareModel(prefs SessionPrefs, cfg config.Config, backends []providers.ModelInfo) (*providers.ModelInfo, error) {
-	if len(backends) == 0 {
-		return nil, fmt.Errorf("%s", NoBackendsMessage())
-	}
-
-	// If a model was requested by partial name, find it.
 	if prefs.Model != "" {
+		want := strings.ToLower(prefs.Model)
 		for _, b := range backends {
-			if strings.Contains(strings.ToLower(b.Name), strings.ToLower(prefs.Model)) {
+			if strings.EqualFold(b.Name, prefs.Model) || strings.EqualFold(b.ID, prefs.Model) {
 				return &b, nil
 			}
+		}
+		for _, b := range backends {
+			if strings.Contains(strings.ToLower(b.Name), want) {
+				return &b, nil
+			}
+		}
+		if provider, id, ok := parseCloudRef(prefs.Model); ok {
+			m := CloudModel(provider, id)
+			return &m, nil
 		}
 		return nil, fmt.Errorf("model %q not found among %d discovered model(s)", prefs.Model, len(backends))
 	}
@@ -44,13 +51,26 @@ func PrepareModel(prefs SessionPrefs, cfg config.Config, backends []providers.Mo
 		}
 	}
 
-	// Default: pick the first tool-capable backend, else the first available.
+	// Default: the first tool-capable local model, else the first local one.
+	var local []providers.ModelInfo
 	for _, b := range backends {
+		if !b.Cloud {
+			local = append(local, b)
+		}
+	}
+	if len(local) == 0 {
+		msg := NoBackendsMessage()
+		if len(backends) > 0 {
+			msg += fmt.Sprintf(" Or pick a hosted model, e.g. --model %s.", backends[0].Name)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	for _, b := range local {
 		if b.ToolsSupported {
 			return &b, nil
 		}
 	}
-	return &backends[0], nil
+	return &local[0], nil
 }
 
 // EffortAdvice returns a human-readable note about the chosen effort level.

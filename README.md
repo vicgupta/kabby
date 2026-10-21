@@ -40,7 +40,7 @@ kabby [workspace] [flags]
 | Flag | Meaning |
 |---|---|
 | `-m, --mode <ro\|edit\|bypass>` | permission mode |
-| `--model <name>` | pick model by partial name |
+| `--model <name>` | pick model by partial name, or `anthropic/<id>`, `openai/<id>` |
 | `--ctx <tokens>` | force context window (≥1024) |
 | `--verify <command>` | headless acceptance gate (requires `-p`) |
 | `--verify-attempts <n>` | max acceptance checks (default 6) |
@@ -55,6 +55,8 @@ kabby [workspace] [flags]
 | `KABBY_KEEP_ALIVE` | Ollama keep-alive override (minutes) |
 | `OLLAMA_HOST` | Ollama base URL |
 | `OMLX_API_KEY` / `MTPLX_API_KEY` | fallback API keys |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | Claude API key or OAuth token |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI API key and optional endpoint |
 
 ## Three surfaces
 
@@ -64,6 +66,31 @@ kabby [workspace] [flags]
   modes, `ctrl+c`×2 to quit.
 - **Web:** `kabby --web` — localhost-only SSE hub at port 7433, multi-session
   sidebar, transcripts under `~/.kabby/sessions/`.
+
+## Hosted models (opt-in)
+
+kabby is local-first: it never sends anything to a hosted API unless you name a
+hosted model.
+
+```sh
+kabby --model anthropic/claude-opus-5-5   # or /model claude-opus-5-5 in the TUI
+kabby --model openai/<model-id>
+```
+
+Claude credentials come from `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an
+OAuth login with Anthropic's `ant auth login`. OpenAI uses `OPENAI_API_KEY`. To
+rotate across several keys, and optionally cap requests per minute per key, add
+them to `~/.kabby.json`:
+
+```json
+{
+  "providerKeys": { "anthropic": ["sk-ant-…", "sk-ant-…"], "openai": ["sk-…"] },
+  "rpm": { "anthropic": 50 }
+}
+```
+
+A key that hits a rate limit, billing or auth error cools down and the request
+moves to the next key.
 
 ## Modes
 

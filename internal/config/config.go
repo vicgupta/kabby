@@ -23,6 +23,13 @@ type Config struct {
 	Effort       string            `json:"effort,omitempty"`
 	Hosts        []SavedHost       `json:"hosts,omitempty"`
 	Keys         map[string]string `json:"keys,omitempty"`
+
+	// ProviderKeys holds API keys for hosted providers ("anthropic",
+	// "openai"). Several keys per provider rotate on rate-limit, billing
+	// and auth errors.
+	ProviderKeys map[string][]string `json:"providerKeys,omitempty"`
+	// RPM caps requests per minute per key for a hosted provider.
+	RPM map[string]int `json:"rpm,omitempty"`
 }
 
 // SavedHost is a remote machine saved in ~/.kabby.json.

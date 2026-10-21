@@ -51,20 +51,23 @@ headless (`-p "prompt"`).
 - **Privacy.** Requests go only to servers the user chose: local ones, or network
   machines the user explicitly added. A network-swept machine is never used or keyed
   until picked. Keys typed at add-time never leave the local machine except to that
-  server.
+  server. Hosted APIs (§3.12) are opt-in per session: their models are listed only
+  when credentials exist, are never picked automatically, and are used only when the
+  user names one (or chose it last time).
 - **One codebase, three surfaces.** TUI and web UI are twins of the same
   `Agent`/`EventBus` core; headless reuses the identical loop.
 
 ### 1.4 Non-goals
 
-- No cloud providers, no sandbox OS isolation (the mode gate is a text check, not a
+- No cloud provider beyond the opt-in hosted APIs in §3.12, no sandbox OS isolation (the mode gate is a text check, not a
   container), no dependency-graph scheduling or subagents, no prompt caching beyond
   what the backend gives, no ranking claims against Claude Code / Codex / OpenCode.
 
 ### 1.5 Constraints
 
 - **Static binary, no runtime deps.** Build with `CGO_ENABLED=0`. Third-party modules
-  are allowed at build time only (currently `golang.org/x/term`).
+  are allowed at build time only (currently `golang.org/x/term` and the official
+  `github.com/anthropics/anthropic-sdk-go`).
 - Go version: whatever the `go` directive in `go.mod` says (currently 1.26).
 - Every command and file access is confined to the workspace by path resolution
   (`internal/sandbox`); anything resolving outside requires approval in `edit` mode.
@@ -92,13 +95,17 @@ internal/tools/       index.go    registry: 4 read tools + 4 write/exec tools by
                       tasks.go    background tasks (start/list/logs/stop, KillAll)
                       check.go    post-write syntax check (Go/JS/JSON/HTML/Python)
 internal/sandbox/     Path confinement + command reach-out text check + approval
-internal/providers/   types, transport, ollama, lmstudio, scheduler
+internal/providers/   types, transport, scheduler; ollama.go; openai.go (OpenAI-
+                      compatible streaming, used by lmstudio.go and hosted OpenAI);
+                      anthropic.go (Claude via the official SDK); keypool.go
+                      (key rotation, per-key pacing, error classification)
 internal/detect/      detect.go   local discovery (ports, docker, WSL/container gateways)
                       hosts.go / network.go   saved remote machines + probes
                       netscan.go  on-demand TCP subnet sweep
                       omlx.go / mtplx.go      health identity, keys, ports from settings
 internal/config/      ~/.kabby.json (lastModel+URL, mode, effort, hosts, keys; 0600)
-internal/session/     Model prep/selection, prefs, advice lines, slash-command glue
+internal/session/     Model prep/selection, prefs, advice lines, slash-command glue;
+                      cloud.go: hosted-model listing, credentials, client factory
 internal/events/      EventBus (compaction notices etc.)
 internal/ui/          Common print/status/warn sink used by all surfaces
 internal/util/        ANSI helpers, truncateMiddle
@@ -239,7 +246,8 @@ func CommandOf(name string, args map[string]any) *string // nil ⇒ not an exec 
   overridable via `KABBY_KEEP_ALIVE`), usage + timing fields; `/api/ps` for loaded
   context; `num_ctx` sent on explicit `--ctx`.
 - **LM Studio:** native `/api/v1/models` catalog (supported effort levels + default),
-  OpenAI-compatible streaming with tools; native load API when an unloaded model gets
+  OpenAI-compatible streaming with tools at `/v1/chat/completions` (tool-call
+  fragments assembled by index, sent only after a finish reason); native load API when an unloaded model gets
   explicit `--ctx`; never reload an already-loaded model just to enlarge the window.
 - **Reasoning effort mapping:** `off` ⇒ `none` on LM Studio, `no_think`-style switch
   on Ollama; snap the requested level to the model's actual supported set; one saved
@@ -252,6 +260,11 @@ func CommandOf(name string, args map[string]any) *string // nil ⇒ not an exec 
 - **Reasoning-exhaustion recovery:** if thinking consumed the whole reply, retry once
   with thinking off; repeats escalate the interval (1 → 2 → max 4 → max 8 responses),
   then retry the session's chosen effort without changing the preference.
+
+- **Tool calls carry IDs.** Every backend returns calls with an ID (Ollama's are
+  numbered by kabby), and each tool result goes back with that ID and the tool name.
+  Arguments that fail to decode, or that miss a required parameter or have the wrong
+  type, are never executed; the error goes back to the model as the tool result.
 
 Per-backend detail lives in `docs/backend-notes.md`.
 
@@ -395,7 +408,7 @@ Per-backend detail lives in `docs/backend-notes.md`.
 |---|---|
 | `[workspace]` | project folder; defaults to cwd |
 | `-m, --mode <ro\|edit\|bypass>` | permission mode |
-| `--model <name>` | pick model by partial name |
+| `--model <name>` | pick model by partial name, or `anthropic/<id>`, `openai/<id>` |
 | `--ctx <tokens>` | force context window (≥1024) |
 | `--verify <command>` | headless acceptance gate (requires `-p`) |
 | `--verify-attempts <n>` | max acceptance checks (default 6) |
@@ -407,6 +420,45 @@ Per-backend detail lives in `docs/backend-notes.md`.
 | `KABBY_KEEP_ALIVE` | Ollama keep-alive override (minutes) |
 | `OLLAMA_HOST` | Ollama base URL |
 | `OMLX_API_KEY` / `MTPLX_API_KEY` | fallback API keys |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` | Claude credentials and endpoint (SDK lookup) |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI key and endpoint |
+
+### 3.12 Hosted APIs (`internal/providers`, `internal/session/cloud.go`)
+
+- **Opt-in only.** Anthropic models are listed when credentials exist
+  (`providerKeys.anthropic`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an
+  `ant auth login` profile under `~/.config/anthropic`). OpenAI models are never
+  listed (that would need a network call); the user names one as `openai/<id>`. Any
+  hosted model is selected only by `--model`/`/model` or by memory, never as the
+  default; the TUI and headless runs print where prompts are being sent.
+- **Anthropic** uses the official Go SDK, streaming. Credentials: configured keys,
+  else the SDK's own lookup (API key → auth token → `ant auth login` OAuth profile),
+  which is kabby's OAuth support. Requests set `max_tokens` 64000, leave `thinking` at
+  the model default (adaptive), map effort to `output_config.effort` (`off`/`low` →
+  `low`, default → `high`), and set `eager_input_streaming` on tools. Models that
+  support it get server-side refusal fallback (`fallbacks: "default"`, beta
+  `server-side-fallback-2026-07-01`); Haiku does not. A `refusal` stop ends the turn
+  without running tools and tells the user the partial reply is incomplete; a
+  `max_tokens` stop never runs its tool calls. Tool results from one assistant turn go
+  back in a single user message.
+- **Append-only conversation for hosted models.** Thinking blocks stay valid only
+  if the prefix is unchanged, so with a hosted model the agent (`StablePrefix`)
+  declares all eight tools in every mode and enforces the mode when a tool runs,
+  keeps the system prompt fixed, and announces mode changes at the start of the next
+  user message. Assistant turns are replayed byte-for-byte from the SDK message
+  (`Native`); after a mid-stream fallback only text survives from before the last
+  `fallback` block. Context compaction for hosted models must stay append-only.
+- **OpenAI** uses the shared OpenAI-compatible client with `Authorization: Bearer`;
+  keys from `providerKeys.openai` or `OPENAI_API_KEY`; `OPENAI_BASE_URL` overrides the
+  endpoint. No temperature is sent; effort maps to `reasoning_effort`. There is no
+  OAuth flow for OpenAI.
+- **Key rotation** (`KeyPool`): keys rotate round-robin; a rate-limit (429/529),
+  billing (402) or auth (401/403) error benches that key (30 s doubling to 30 min;
+  billing 1 h doubling to 12 h) and retries on the next key, but only before any
+  output streamed. Timeouts, network errors and bad requests do not rotate. When every
+  key is benched, the one back soonest is tried. `rpm.<provider>` in config spaces
+  requests on each key evenly to stay under that rate. With several keys the SDK's own
+  retries are off so a throttled key fails over at once.
 
 ---
 
@@ -604,11 +656,14 @@ backend/endpoint).
 
 1. **Close spec gaps found in the code** (as of v0.7.11):
    - `KABBY_KEEP_ALIVE` is never read, and nothing sends Ollama `keep_alive` (§3.2).
-   - The TUI implements only `/help`, `/model`, `/stream`, and `/exit`; §3.8 lists the full set
+   - The TUI implements only `/help`, `/model`, `/stream`, `/clear`, and `/exit`; §3.8 lists the full set
      (and names it `/models`).
    - `internal/detect/testdata/` does not exist yet (§5).
-   - The TUI bypasses the agent loop: `tui.submit` calls the model directly with no
-     tools and no history, so the terminal is chat-only (§3.6, §3.8).
+   - `--verify` does not run the command: `runCommandSimple` passes only the literal
+     `true`, so every real acceptance gate fails (§3.6).
+   - `/model` in the TUI keeps the conversation when switching between a local and a
+     hosted model; the hosted model then sees a history it did not write, which is
+     valid but untested live.
    - `web.TestStoreList` is flaky (about 2 runs in 5 fail cleaning up `t.TempDir()`:
      "directory not empty").
 2. **Human pass on the terminal TUI** — drive the logo, slash menu, shift+tab,

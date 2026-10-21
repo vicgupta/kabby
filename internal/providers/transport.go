@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -124,3 +125,7 @@ func (r *SSEReader) NextData() (string, bool) {
 	}
 	return "", false
 }
+
+// ErrStreamCut reports a response stream that ended before the backend
+// marked it complete. Any tool calls seen on such a stream are discarded.
+var ErrStreamCut = errors.New("response stream ended before completion")

@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -260,3 +261,21 @@ func TestEffortConstants(t *testing.T) {
 }
 
 var _ = io.ReadAll
+
+func TestOllamaCancelIsRecognisable(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release) // runs first, so Close does not wait on the handler
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	_, err := NewOllama(srv.URL, NewTransport()).Chat(ctx, ChatRequest{Model: "m"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled chat must report context.Canceled, got %v", err)
+	}
+}

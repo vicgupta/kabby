@@ -406,3 +406,49 @@ func TestStreamOffRendersMarkdownAfterReply(t *testing.T) {
 		t.Fatalf("expected rendered markdown when streaming is off, got %q", out.String())
 	}
 }
+
+// toolThenAnswerClient asks for one list_files call, then answers.
+type toolThenAnswerClient struct{ calls int }
+
+func (c *toolThenAnswerClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
+	c.calls++
+	ch := make(chan providers.ChatResult, 2)
+	if c.calls == 1 {
+		ch <- providers.ChatResult{Done: true, ToolCalls: []providers.ToolCall{{ID: "c1", Name: "list_files", Arguments: map[string]any{"path": "."}}}}
+	} else {
+		ch <- providers.ChatResult{Content: "all done", Done: true, EvalCount: 3}
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestTUIRunsToolsThroughTheAgentLoop(t *testing.T) {
+	out := &bytes.Buffer{}
+	client := &toolThenAnswerClient{}
+	tu := NewTUI(bytes.NewReader(nil), out, "m", "ollama", "http://x", client, config.Config{})
+	tu.SetWorkspace(t.TempDir())
+	submitLine(tu, "look around")
+	got := out.String()
+	if client.calls != 2 {
+		t.Fatalf("expected a tool round-trip (2 model calls), got %d", client.calls)
+	}
+	if !strings.Contains(got, "· list_files .") || !strings.Contains(got, "all done") {
+		t.Fatalf("expected the tool line and the answer, got %q", got)
+	}
+	if !strings.Contains(got, "1 tools") {
+		t.Fatalf("expected a stats line, got %q", got)
+	}
+}
+
+func TestSlashClearResetsConversation(t *testing.T) {
+	out := &bytes.Buffer{}
+	tu := NewTUI(bytes.NewReader(nil), out, "m", "ollama", "http://x", &chunkClient{chunks: []string{"hi"}}, config.Config{})
+	submitLine(tu, "hello")
+	if len(tu.agent.History) == 0 {
+		t.Fatal("expected history after a turn")
+	}
+	submitLine(tu, "/clear")
+	if len(tu.agent.History) != 0 {
+		t.Fatal("expected /clear to reset the conversation")
+	}
+}

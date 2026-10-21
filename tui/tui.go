@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/term"
@@ -15,6 +17,7 @@ import (
 	"kabby/internal/config"
 	kctx "kabby/internal/context"
 	"kabby/internal/plan"
+	"kabby/internal/prompt"
 	"kabby/internal/providers"
 	"kabby/internal/session"
 	"kabby/internal/tools"
@@ -32,7 +35,9 @@ type TUI struct {
 	model    string
 	backend  string
 	url      string
-	agent    agent.ChatClient
+	info     providers.ModelInfo
+	client   agent.ChatClient
+	agent    *agent.Agent
 	backends []providers.ModelInfo
 	ctxMgr   *kctx.Manager
 	toolsCtx *tools.ToolContext
@@ -41,38 +46,94 @@ type TUI struct {
 
 	raw      bool // whether raw mode is active
 	oldState *term.State
+
+	// keys carries raw input while Run's event loop is active; nil when
+	// keys are fed through handleKey directly (tests), in which case turns
+	// run synchronously and reach-out commands are denied.
+	keys      chan []byte
+	approvals chan approvalRequest
+
+	outMu       sync.Mutex
+	atLineStart bool
+}
+
+// approvalRequest asks the user, from the turn goroutine, to approve a
+// command that reaches outside the workspace.
+type approvalRequest struct {
+	command, reason string
+	reply           chan bool
 }
 
 // NewTUI creates a TUI reading from in and writing to out, connected to the
-// given model/backend and agent.
-func NewTUI(in io.Reader, out io.Writer, model, backend, url string, a agent.ChatClient, cfg config.Config) *TUI {
-	window := 4096
-	ctxMgr := kctx.NewManager(window)
-	tc := &tools.ToolContext{
+// given model/backend and chat client.
+func NewTUI(in io.Reader, out io.Writer, model, backend, url string, client agent.ChatClient, cfg config.Config) *TUI {
+	t := &TUI{
+		in:          in,
+		out:         out,
+		edit:        NewEditor(),
+		mode:        "edit",
+		stream:      true,
+		plan:        plan.New(),
+		cfg:         cfg,
+		atLineStart: true,
+	}
+	t.toolsCtx = &tools.ToolContext{
 		Workspace:       os.Getenv("PWD"),
 		ResultCharLimit: 10000,
 		TaskManager:     tools.NewTaskManager(),
-		Plan:            plan.New(),
+		Plan:            t.plan,
 	}
-	return &TUI{
-		in:       in,
-		out:      out,
-		edit:     NewEditor(),
-		mode:     "edit",
-		stream:   true,
-		model:    model,
-		backend:  backend,
-		url:      url,
-		agent:    a,
-		ctxMgr:   ctxMgr,
-		toolsCtx: tc,
-		plan:     plan.New(),
-		cfg:      cfg,
+	t.ctxMgr = kctx.NewManager(4096)
+	t.agent = agent.NewAgent(client, t.ctxMgr, t.plan, t.toolsCtx, cfg)
+	t.agent.Observer = agent.Observer{
+		OnText:       t.onText,
+		OnToolCall:   t.onToolCall,
+		OnToolResult: t.onToolResult,
+		OnNotice:     func(s string) { t.writeLine(s) },
+		Approve:      t.approve,
+	}
+	t.SetModel(providers.ModelInfo{ID: model, Name: model, Backend: backend, URL: url, ToolsSupported: true, ContextWindow: 4096}, client)
+	return t
+}
+
+// SetModel points the session at a model and its chat client. The
+// conversation is kept, so a switch continues where it left off.
+func (t *TUI) SetModel(m providers.ModelInfo, client agent.ChatClient) {
+	t.info = m
+	t.model, t.backend, t.url = m.ID, m.Backend, m.URL
+	t.client = client
+	window := m.ContextWindow
+	if window <= 0 {
+		window = 4096
+	}
+	t.ctxMgr = kctx.NewManager(window)
+	t.agent.CtxManager = t.ctxMgr
+	t.agent.Client = client
+	t.agent.Model = m.ID
+	t.agent.Backend = m.Backend
+	t.agent.ChatOnly = !m.ToolsSupported
+	t.agent.StablePrefix = t.agent.StablePrefix || m.Cloud
+}
+
+// SetMode sets the starting permission mode ("" keeps edit).
+func (t *TUI) SetMode(mode string) {
+	if mode != "" {
+		t.mode = mode
 	}
 }
 
-// SetBackends records the locally discovered model backends, enabling the
-// /model command to switch between them.
+// SetEffort sets the reasoning effort sent with every request.
+func (t *TUI) SetEffort(e providers.Effort) {
+	t.agent.Effort = e
+}
+
+// SetWorkspace sets the folder the tools are confined to.
+func (t *TUI) SetWorkspace(dir string) {
+	t.toolsCtx.Workspace = dir
+}
+
+// SetBackends records the discovered models (local and hosted), enabling
+// the /model command to switch between them.
 func (t *TUI) SetBackends(backends []providers.ModelInfo) {
 	t.backends = backends
 }
@@ -91,7 +152,7 @@ func (t *TUI) Run() error {
 		defer term.Restore(int(fd(t.in)), oldState)
 	}
 
-	// Handle signals to restore terminal.
+	// Handle signals to restore terminal and stop background tasks.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -99,28 +160,44 @@ func (t *TUI) Run() error {
 		if t.raw && t.oldState != nil {
 			term.Restore(int(fd(t.in)), t.oldState)
 		}
+		t.toolsCtx.TaskManager.KillAll()
 		os.Exit(130)
+	}()
+	defer t.toolsCtx.TaskManager.KillAll()
+
+	// A reader goroutine feeds keys so input stays live while a turn runs
+	// (esc cancels it, y/n answers approval prompts).
+	t.keys = make(chan []byte)
+	t.approvals = make(chan approvalRequest)
+	go func() {
+		for {
+			buf := make([]byte, 64)
+			n, err := t.in.Read(buf)
+			if n > 0 {
+				t.keys <- buf[:n]
+			}
+			if err != nil {
+				close(t.keys)
+				return
+			}
+		}
 	}()
 
 	// Show startup banner (no screen clearing, just append).
 	t.write(fmt.Sprintf("kabby v0.7.11 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	if t.info.Cloud {
+		t.write(fmt.Sprintf("note: %s is a hosted model; prompts and file contents are sent to %s.\r\n", t.model, t.url))
+	}
 	t.write("Type /help for commands, /exit to quit.\r\n")
 
 	// Print the initial prompt.
 	t.write("> ")
 
 	for !t.quit {
-		data := make([]byte, 64)
-		n, err := t.in.Read(data)
-		if err != nil {
-			if n == 0 {
-				return err
-			}
-			data = data[:n]
-		} else {
-			data = data[:n]
+		data, ok := <-t.keys
+		if !ok {
+			return nil
 		}
-
 		for len(data) > 0 {
 			var key Key
 			key, data, _ = ParseKey(data)
@@ -136,9 +213,26 @@ func (t *TUI) redrawLine() {
 	t.write("\r\033[K> " + t.edit.Text())
 }
 
-// write writes to the output.
+// write writes to the output. It is safe to call from the turn goroutine.
 func (t *TUI) write(s string) {
+	if s == "" {
+		return
+	}
+	t.outMu.Lock()
+	defer t.outMu.Unlock()
 	io.WriteString(t.out, s)
+	t.atLineStart = strings.HasSuffix(s, "\n")
+}
+
+// writeLine writes s on a line of its own.
+func (t *TUI) writeLine(s string) {
+	t.outMu.Lock()
+	start := t.atLineStart
+	t.outMu.Unlock()
+	if !start {
+		s = "\r\n" + s
+	}
+	t.write(s + "\r\n")
 }
 
 // handleKey processes a key event.
@@ -210,7 +304,7 @@ func (t *TUI) submit() {
 	t.edit.AddHistory(line)
 	t.edit.Clear()
 	if t.raw {
-		t.write("\r\n> ")
+		t.write("\r\n")
 	} else {
 		t.write(fmt.Sprintf("\r\n> %s\r\n", line))
 	}
@@ -223,50 +317,167 @@ func (t *TUI) submit() {
 		return
 	}
 
-	// Send the prompt to the model via the agent.
-	if t.agent != nil {
-		if !t.stream {
-			t.write("…\r\n")
-		}
-		req := providers.ChatRequest{
-			Model:         t.model,
-			Messages:      []providers.ChatMessage{{Role: "user", Content: line}},
-			Tools:         nil,
-			ContextWindow: t.ctxMgr.Budget().Window,
-			Effort:        "default",
-		}
-		results, err := t.agent.Chat(context.Background(), req)
-		if err != nil {
-			t.write(fmt.Sprintf("error: %v\r\n", err))
-			t.write("\r> ")
-			return
-		}
-		var sb strings.Builder
-		for result := range results {
-			if result.Err != nil {
-				t.write(fmt.Sprintf("\r\nerror: %v\r\n", result.Err))
-				t.write("\r> ")
-				return
-			}
-			sb.WriteString(result.Content)
-			if t.stream {
-				// Raw mode has OPOST off, so bare \n would staircase.
-				t.write(strings.ReplaceAll(result.Content, "\n", "\r\n"))
-			}
-			if result.Done {
-				break
-			}
-		}
-		if t.stream {
-			t.write("\r\n")
-		} else {
-			t.write(renderMarkdown(sb.String()) + "\r\n")
-		}
-	} else {
-		t.write("(no model connected)\r\n")
+	if t.client == nil {
+		t.write("(no model connected)\r\n> ")
+		return
 	}
+	t.runTurn(line)
 	t.write("> ")
 }
+
+// systemPrompt returns message[0] for the current model and mode. Hosted
+// models keep one prompt for the whole conversation (mode changes are
+// announced by the agent instead).
+func (t *TUI) systemPrompt() string {
+	var sys string
+	switch {
+	case !t.info.ToolsSupported:
+		sys = prompt.ChatOnlyPrompt()
+	case t.agent.StablePrefix:
+		sys = prompt.SystemPrompt("edit")
+	default:
+		sys = prompt.SystemPrompt(t.mode)
+	}
+	return prompt.InjectAGENTSMD(sys, t.toolsCtx.Workspace)
+}
+
+type turnResult struct {
+	answer string
+	err    error
+}
+
+// runTurn sends one prompt through the agent loop. With the event loop
+// running, the turn runs in a goroutine while keys stay live: esc or ctrl+c
+// cancel it, y/n answer approval prompts.
+func (t *TUI) runTurn(line string) {
+	t.agent.Config.LastMode = t.mode
+	if !t.stream {
+		t.write("…\r\n")
+	}
+	sys := t.systemPrompt()
+
+	if t.keys == nil {
+		answer, err := t.agent.RunTurn(context.Background(), sys, line)
+		t.finishTurn(answer, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan turnResult, 1)
+	go func() {
+		answer, err := t.agent.RunTurn(ctx, sys, line)
+		done <- turnResult{answer, err}
+	}()
+
+	var pending *approvalRequest
+	for {
+		select {
+		case r := <-done:
+			t.finishTurn(r.answer, r.err)
+			return
+		case req := <-t.approvals:
+			pending = &req
+			t.writeLine(fmt.Sprintf("approve? %s\r\n  %s\r\n  [y/N] ", req.reason, req.command))
+		case data, ok := <-t.keys:
+			if !ok {
+				cancel()
+				r := <-done
+				t.finishTurn(r.answer, r.err)
+				t.quit = true
+				return
+			}
+			for len(data) > 0 {
+				var key Key
+				key, data, _ = ParseKey(data)
+				if pending != nil {
+					yes := key.Rune == 'y' || key.Rune == 'Y'
+					if yes {
+						t.write("yes\r\n")
+					} else {
+						t.write("no\r\n")
+					}
+					pending.reply <- yes
+					pending = nil
+					continue
+				}
+				if key.Code == "escape" || key.IsCtrlC() {
+					cancel()
+					t.writeLine("(cancelling…)")
+				}
+			}
+		}
+	}
+}
+
+// approve asks the user to allow a reach-out command. It runs on the turn
+// goroutine and blocks until runTurn's loop collects the answer.
+func (t *TUI) approve(command, reason string) bool {
+	if t.approvals == nil {
+		return false
+	}
+	reply := make(chan bool)
+	t.approvals <- approvalRequest{command: command, reason: reason, reply: reply}
+	return <-reply
+}
+
+func (t *TUI) onText(s string) {
+	if t.stream {
+		// Raw mode has OPOST off, so bare \n would staircase.
+		t.write(strings.ReplaceAll(s, "\n", "\r\n"))
+	}
+}
+
+func (t *TUI) onToolCall(name string, args map[string]any) {
+	t.writeLine(dim("· " + name + " " + argSummary(args)))
+}
+
+func (t *TUI) onToolResult(name, result string, failed bool) {
+	if failed {
+		first, _, _ := strings.Cut(result, "\n")
+		t.writeLine(dim("  " + truncate(first, 160)))
+	}
+}
+
+// finishTurn prints the end of a turn: the rendered answer when streaming
+// is off, any error, and the turn's stats.
+func (t *TUI) finishTurn(answer string, err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		t.writeLine("cancelled")
+	case err != nil:
+		t.writeLine(fmt.Sprintf("error: %v", err))
+	case t.stream:
+		if !t.atLineStart {
+			t.write("\r\n")
+		}
+	default:
+		t.write(renderMarkdown(answer) + "\r\n")
+	}
+	s := t.agent.LastStats
+	if err == nil && (s.ToolsCalled > 0 || s.OutputTokens > 0) {
+		t.write(dim(fmt.Sprintf("%d tools · %d tokens · %.1f tok/s", s.ToolsCalled, s.TotalTokens, s.TokensPerSec)) + "\r\n")
+	}
+}
+
+// argSummary picks the argument that identifies a tool call.
+func argSummary(args map[string]any) string {
+	for _, k := range []string{"command", "path", "pattern", "action"} {
+		if v, ok := args[k].(string); ok && v != "" {
+			return truncate(v, 100)
+		}
+	}
+	return ""
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+func dim(s string) string { return "\033[2m" + s + "\033[0m" }
 
 // handleCommand dispatches a slash command (the line has already been
 // confirmed to start with "/"). Unrecognized commands get an explicit
@@ -278,6 +489,10 @@ func (t *TUI) handleCommand(line string) {
 		return
 	case line == "/help":
 		t.write(helpText())
+	case line == "/clear":
+		t.agent.Reset()
+		t.plan.Reset()
+		t.write("conversation cleared\r\n")
 	case line == "/model" || strings.HasPrefix(line, "/model "):
 		query := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 		t.write(t.handleModelCommand(query))
@@ -295,14 +510,16 @@ func helpText() string {
 	lines := []string{
 		"Commands:",
 		"  /help          show this message",
-		"  /model         show the current model",
-		"  /model <name>  switch to a discovered model by partial name match",
+		"  /model         show the current model and list the others",
+		"  /model <name>  switch model by partial name, or anthropic/<id>, openai/<id>",
 		"  /stream        toggle streaming replies (on by default); /stream on|off",
+		"  /clear         start a new conversation",
 		"  /exit, :q      quit",
 		"",
 		"Keys:",
 		"  shift+tab      cycle permission mode (ro -> edit -> bypass)",
-		"  ctrl+c         quit",
+		"  esc            cancel the running turn, else clear the input",
+		"  ctrl+c         cancel the running turn, else quit",
 		"  ctrl+l         clear screen",
 		"  ctrl+u         clear the input line",
 	}
@@ -310,15 +527,23 @@ func helpText() string {
 }
 
 // handleModelCommand shows or switches the active model. With no query it
-// reports the current model; with a query it reuses the same partial-name
-// matching as the --model flag (session.PrepareModel) against the locally
-// discovered backends.
+// reports the current model and lists the others; with a query it reuses
+// the --model matching (session.PrepareModel), which also accepts
+// "anthropic/<id>" and "openai/<id>".
 func (t *TUI) handleModelCommand(query string) string {
 	if query == "" {
 		if t.model == "" {
 			return "(no model connected)\r\n"
 		}
-		return fmt.Sprintf("model: %s (backend: %s, %s)\r\n", t.model, t.backend, t.url)
+		out := fmt.Sprintf("model: %s (backend: %s, %s)\r\n", t.model, t.backend, t.url)
+		for _, b := range t.backends {
+			marker := "  "
+			if b.ID == t.model && b.URL == t.url {
+				marker = "* "
+			}
+			out += fmt.Sprintf("%s%s (%s)\r\n", marker, b.Name, b.Backend)
+		}
+		return out
 	}
 
 	chosen, err := session.PrepareModel(session.SessionPrefs{Model: query}, t.cfg, t.backends)
@@ -326,13 +551,16 @@ func (t *TUI) handleModelCommand(query string) string {
 		return fmt.Sprintf("%v\r\n", err)
 	}
 
-	if chosen.Backend != t.backend || chosen.URL != t.url {
-		t.agent = clientForBackend(chosen.Backend, chosen.URL)
+	client := t.client
+	if chosen.Backend != t.backend || chosen.URL != t.url || client == nil {
+		client = session.NewClient(*chosen, t.cfg)
 	}
-	t.model = chosen.ID
-	t.backend = chosen.Backend
-	t.url = chosen.URL
-	return fmt.Sprintf("switched to model: %s (backend: %s)\r\n", t.model, t.backend)
+	t.SetModel(*chosen, client)
+	msg := fmt.Sprintf("switched to model: %s (backend: %s)\r\n", t.model, t.backend)
+	if chosen.Cloud {
+		msg += fmt.Sprintf("note: hosted model; prompts and file contents are sent to %s.\r\n", chosen.URL)
+	}
+	return msg
 }
 
 // handleStreamCommand toggles streaming with no argument, or sets it
@@ -353,16 +581,6 @@ func (t *TUI) handleStreamCommand(arg string) string {
 		return "streaming: on\r\n"
 	}
 	return "streaming: off\r\n"
-}
-
-// clientForBackend builds the chat client for a discovered backend.
-func clientForBackend(backend, url string) agent.ChatClient {
-	switch backend {
-	case "lmstudio":
-		return providers.NewLMStudio(url, providers.NewTransport())
-	default:
-		return providers.NewOllama(url, providers.NewTransport())
-	}
 }
 
 // renderMarkdown converts basic markdown to plain text suitable for a terminal.

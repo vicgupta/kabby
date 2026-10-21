@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"kabby/internal/config"
@@ -96,4 +97,57 @@ func stringsContains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestPrepareModelNeverAutoPicksCloud(t *testing.T) {
+	cloud := CloudModel(ProviderAnthropic, "claude-opus-5-5")
+	local := providers.ModelInfo{ID: "qwen", Name: "qwen", Backend: "ollama", URL: "http://a", ToolsSupported: true}
+
+	got, err := PrepareModel(SessionPrefs{}, config.Config{}, []providers.ModelInfo{cloud, local})
+	if err != nil || got.ID != "qwen" {
+		t.Fatalf("default must be the local model, got %v, %v", got, err)
+	}
+	if _, err := PrepareModel(SessionPrefs{}, config.Config{}, []providers.ModelInfo{cloud}); err == nil ||
+		!strings.Contains(err.Error(), "--model anthropic/claude-opus-5-5") {
+		t.Fatalf("with only hosted models, expect a hint to name one, got %v", err)
+	}
+	got, err = PrepareModel(SessionPrefs{Model: "opus"}, config.Config{}, []providers.ModelInfo{local, cloud})
+	if err != nil || !got.Cloud {
+		t.Fatalf("a hosted model is chosen when named, got %v, %v", got, err)
+	}
+}
+
+func TestPrepareModelAcceptsProviderRefs(t *testing.T) {
+	got, err := PrepareModel(SessionPrefs{Model: "openai/gpt-x"}, config.Config{}, nil)
+	if err != nil || got.Backend != ProviderOpenAI || got.ID != "gpt-x" || !got.Cloud {
+		t.Fatalf("openai/<id> should resolve without a listing, got %+v, %v", got, err)
+	}
+	if _, err := PrepareModel(SessionPrefs{Model: "mystery/x"}, config.Config{}, nil); err == nil {
+		t.Fatal("unknown provider prefixes must not resolve")
+	}
+}
+
+func TestCloudKeysPreferConfigOverEnv(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "from-env")
+	if got := cloudKeys(ProviderOpenAI, config.Config{}); len(got) != 1 || got[0] != "from-env" {
+		t.Fatalf("env key expected, got %v", got)
+	}
+	cfg := config.Config{ProviderKeys: map[string][]string{ProviderOpenAI: {"k1", " ", "k2"}}}
+	if got := cloudKeys(ProviderOpenAI, cfg); strings.Join(got, ",") != "k1,k2" {
+		t.Fatalf("configured keys expected, got %v", got)
+	}
+}
+
+func TestCloudModelsNeedCredentials(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got := CloudModels(config.Config{}); len(got) != 0 {
+		t.Fatalf("no credentials, no hosted models; got %d", len(got))
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	if got := CloudModels(config.Config{}); len(got) == 0 || !got[0].Cloud {
+		t.Fatalf("expected hosted models with a key, got %v", got)
+	}
 }
