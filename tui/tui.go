@@ -93,11 +93,13 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.7.3 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
-	t.write("Type /help for commands, /exit to quit.\r\n\r\n")
+	t.write(fmt.Sprintf("kabby v0.7.5 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write("Type /help for commands, /exit to quit.\r\n")
+
+	// Print the initial prompt.
+	t.write("> ")
 
 	for !t.quit {
-		t.prompt()
 		data := make([]byte, 64)
 		n, err := t.in.Read(data)
 		if err != nil {
@@ -116,11 +118,6 @@ func (t *TUI) Run() error {
 		}
 	}
 	return nil
-}
-
-// prompt draws the input line.
-func (t *TUI) prompt() {
-	t.write("\r\n> " + t.edit.Text())
 }
 
 // write writes to the output.
@@ -235,6 +232,7 @@ func (t *TUI) submit() {
 	} else {
 		t.write("(no model connected)\r\n")
 	}
+	t.write("> ")
 }
 
 // RunStdin runs the TUI using os.Stdin and os.Stdout with no model connected.
