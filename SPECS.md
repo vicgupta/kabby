@@ -409,6 +409,7 @@ Per-backend detail lives in `docs/backend-notes.md`.
 | `[workspace]` | project folder; defaults to cwd |
 | `-m, --mode <ro\|edit\|bypass>` | permission mode |
 | `--model <name>` | pick model by partial name, or `anthropic/<id>`, `openai/<id>` |
+| `--provider <name>` | limit models to one provider: `ollama`, `lmstudio`, `omlx`, `mtplx`, `anthropic`, `openai` |
 | `--ctx <tokens>` | force context window (≥1024) |
 | `--verify <command>` | headless acceptance gate (requires `-p`) |
 | `--verify-attempts <n>` | max acceptance checks (default 6) |

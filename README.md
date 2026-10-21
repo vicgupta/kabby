@@ -41,6 +41,7 @@ kabby [workspace] [flags]
 |---|---|
 | `-m, --mode <ro\|edit\|bypass>` | permission mode |
 | `--model <name>` | pick model by partial name, or `anthropic/<id>`, `openai/<id>` |
+| `--provider <name>` | limit models to one provider: `ollama`, `lmstudio`, `omlx`, `mtplx`, `anthropic`, `openai` |
 | `--ctx <tokens>` | force context window (≥1024) |
 | `--verify <command>` | headless acceptance gate (requires `-p`) |
 | `--verify-attempts <n>` | max acceptance checks (default 6) |
@@ -70,11 +71,12 @@ kabby [workspace] [flags]
 ## Hosted models (opt-in)
 
 kabby is local-first: it never sends anything to a hosted API unless you name a
-hosted model.
+hosted model or provider.
 
 ```sh
 kabby --model anthropic/claude-opus-5-5   # or /model claude-opus-5-5 in the TUI
 kabby --model openai/<model-id>
+kabby --provider anthropic                # default Claude model; add --model to pick one
 ```
 
 Claude credentials come from `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an

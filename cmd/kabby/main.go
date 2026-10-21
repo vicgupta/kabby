@@ -42,6 +42,7 @@ var longToShort = map[string]string{
 	"print":           "p",
 	"mode":            "m",
 	"model":           "model",
+	"provider":        "provider",
 	"ctx":             "ctx",
 	"web":             "web",
 	"verify":          "verify",
@@ -80,6 +81,7 @@ func run(args []string) int {
 	print := flag.String("p", "", "headless: one prompt, then exit")
 	mode := flag.String("m", "", "permission mode: ro|edit|bypass")
 	model := flag.String("model", "", "pick model by partial name")
+	provider := flag.String("provider", "", "limit models to one provider")
 	ctx := flag.Int("ctx", 0, "force context window (>=1024)")
 	verify := flag.String("verify", "", "headless acceptance gate (requires -p)")
 	verifyAttempts := flag.Int("verify-attempts", 6, "max acceptance checks")
@@ -124,9 +126,9 @@ func run(args []string) int {
 	case *web != "":
 		return runWeb(*web, workspace)
 	case *print != "":
-		return runHeadless(*print, workspace, *model, *mode, *effort, *verify, *ctx, *verifyAttempts)
+		return runHeadless(*print, workspace, *provider, *model, *mode, *effort, *verify, *ctx, *verifyAttempts)
 	default:
-		return runTUI(workspace, *model, *mode, *effort, *ctx)
+		return runTUI(workspace, *provider, *model, *mode, *effort, *ctx)
 	}
 }
 
@@ -166,7 +168,7 @@ func discoverBackends(cfg config.Config) []providers.ModelInfo {
 }
 
 // loadSession loads config, applies the mode flag, and picks a model.
-func loadSession(modelFlag, modeFlag string, ctxFlag int) (config.Config, []providers.ModelInfo, *providers.ModelInfo, error) {
+func loadSession(providerFlag, modelFlag, modeFlag string, ctxFlag int) (config.Config, []providers.ModelInfo, *providers.ModelInfo, error) {
 	config.SetConfigPath(os.Getenv("KABBY_CONFIG"))
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -181,7 +183,7 @@ func loadSession(modelFlag, modeFlag string, ctxFlag int) (config.Config, []prov
 	}
 
 	backends := discoverBackends(cfg)
-	chosen, err := session.PrepareModel(session.SessionPrefs{Model: modelFlag, CTX: ctxFlag}, cfg, backends)
+	chosen, err := session.PrepareModel(session.SessionPrefs{Provider: providerFlag, Model: modelFlag, CTX: ctxFlag}, cfg, backends)
 	if err != nil {
 		return cfg, backends, nil, err
 	}
@@ -203,13 +205,13 @@ func parseEffort(s string) (providers.Effort, error) {
 }
 
 // runHeadless runs one prompt and exits.
-func runHeadless(prompt, workspace, modelFlag, modeFlag, effortFlag, verify string, ctxFlag int, attempts int) int {
+func runHeadless(prompt, workspace, providerFlag, modelFlag, modeFlag, effortFlag, verify string, ctxFlag int, attempts int) int {
 	effort, err := parseEffort(effortFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
 	}
-	cfg, _, chosen, err := loadSession(modelFlag, modeFlag, ctxFlag)
+	cfg, _, chosen, err := loadSession(providerFlag, modelFlag, modeFlag, ctxFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -310,13 +312,13 @@ func runCommandSimple(cmd, workspace string) bool {
 
 // runTUI starts the raw-mode terminal UI, discovers local model servers,
 // assigns a default model, and connects the TUI to the agent loop.
-func runTUI(workspace, modelFlag, modeFlag, effortFlag string, ctxFlag int) int {
+func runTUI(workspace, providerFlag, modelFlag, modeFlag, effortFlag string, ctxFlag int) int {
 	effort, err := parseEffort(effortFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
 	}
-	cfg, backends, chosen, err := loadSession(modelFlag, modeFlag, ctxFlag)
+	cfg, backends, chosen, err := loadSession(providerFlag, modelFlag, modeFlag, ctxFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -356,6 +358,7 @@ func printHelp() {
 	for _, r := range []helpRow{
 		{"-m, --mode <ro|edit|bypass>", "permission mode"},
 		{"--model <name>", "pick model by partial name, or anthropic/<id>, openai/<id>"},
+		{"--provider <name>", "ollama|lmstudio|omlx|mtplx|anthropic|openai"},
 		{"--ctx <tokens>", "force context window (>=1024)"},
 		{"--verify <command>", "headless acceptance gate (requires -p)"},
 		{"--verify-attempts <n>", "max acceptance checks (default 6)"},

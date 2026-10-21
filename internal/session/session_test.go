@@ -127,6 +127,57 @@ func TestPrepareModelAcceptsProviderRefs(t *testing.T) {
 	}
 }
 
+func TestPrepareModelProvider(t *testing.T) {
+	ollama := providers.ModelInfo{ID: "qwen", Name: "qwen", Backend: "ollama", URL: "http://a", ToolsSupported: true}
+	lms := providers.ModelInfo{ID: "qwen-lms", Name: "qwen-lms", Backend: "lmstudio", URL: "http://b", ToolsSupported: true}
+	cloud := CloudModel(ProviderAnthropic, "claude-opus-5-5")
+	all := []providers.ModelInfo{ollama, lms, cloud}
+
+	got, err := PrepareModel(SessionPrefs{Provider: "LMStudio"}, config.Config{}, all)
+	if err != nil || got.ID != "qwen-lms" {
+		t.Fatalf("provider should pick its first model, got %v, %v", got, err)
+	}
+	got, err = PrepareModel(SessionPrefs{Provider: "lmstudio", Model: "qwen"}, config.Config{}, all)
+	if err != nil || got.ID != "qwen-lms" {
+		t.Fatalf("model search should stay inside the provider, got %v, %v", got, err)
+	}
+	got, err = PrepareModel(SessionPrefs{Provider: "lmstudio"}, config.Config{LastModel: "qwen", LastModelURL: "http://a"}, all)
+	if err != nil || got.ID != "qwen-lms" {
+		t.Fatalf("a remembered model from another provider must be ignored, got %v, %v", got, err)
+	}
+	if _, err := PrepareModel(SessionPrefs{Provider: "omlx"}, config.Config{}, all); err == nil ||
+		!strings.Contains(err.Error(), "no omlx models") {
+		t.Fatalf("a provider with no models should say so, got %v", err)
+	}
+	if _, err := PrepareModel(SessionPrefs{Provider: "mystery"}, config.Config{}, all); err == nil ||
+		!strings.Contains(err.Error(), "unknown provider") {
+		t.Fatalf("unknown providers must be rejected, got %v", err)
+	}
+}
+
+func TestPrepareModelCloudProvider(t *testing.T) {
+	local := providers.ModelInfo{ID: "qwen", Name: "qwen", Backend: "ollama", URL: "http://a", ToolsSupported: true}
+
+	got, err := PrepareModel(SessionPrefs{Provider: "anthropic"}, config.Config{}, []providers.ModelInfo{local})
+	if err != nil || got.Backend != ProviderAnthropic || got.ID != providers.AnthropicModels[0] {
+		t.Fatalf("anthropic with no model should use the default Claude model, got %v, %v", got, err)
+	}
+	got, err = PrepareModel(SessionPrefs{Provider: "anthropic", Model: "claude-haiku-5-5"}, config.Config{}, nil)
+	if err != nil || got.Backend != ProviderAnthropic || got.ID != "claude-haiku-5-5" {
+		t.Fatalf("a bare ID should resolve under a hosted provider, got %v, %v", got, err)
+	}
+	got, err = PrepareModel(SessionPrefs{Provider: "openai", Model: "gpt-x"}, config.Config{}, nil)
+	if err != nil || got.Backend != ProviderOpenAI || got.ID != "gpt-x" {
+		t.Fatalf("openai with a model should resolve, got %v, %v", got, err)
+	}
+	if _, err := PrepareModel(SessionPrefs{Provider: "openai"}, config.Config{}, nil); err == nil {
+		t.Fatal("openai without a model must ask for one")
+	}
+	if _, err := PrepareModel(SessionPrefs{Provider: "openai", Model: "anthropic/claude-opus-5-5"}, config.Config{}, nil); err == nil {
+		t.Fatal("a model ref from another provider must be rejected")
+	}
+}
+
 func TestCloudKeysPreferConfigOverEnv(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "from-env")
 	if got := cloudKeys(ProviderOpenAI, config.Config{}); len(got) != 1 || got[0] != "from-env" {

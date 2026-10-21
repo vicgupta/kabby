@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"kabby/internal/config"
@@ -10,10 +11,32 @@ import (
 
 // SessionPrefs holds user-selected session preferences.
 type SessionPrefs struct {
-	Mode   providers.Mode
-	Model  string
-	CTX    int
-	Effort *providers.Effort
+	Mode     providers.Mode
+	Provider string
+	Model    string
+	CTX      int
+	Effort   *providers.Effort
+}
+
+// localProviders are the local server backends --provider accepts; the
+// hosted ones are the keys of cloudBaseURL.
+var localProviders = []string{"ollama", "lmstudio", "omlx", "mtplx"}
+
+// filterProvider keeps the backends served by provider, rejecting names
+// that are neither a local server nor a hosted API.
+func filterProvider(provider string, backends []providers.ModelInfo) ([]providers.ModelInfo, error) {
+	_, cloud := cloudBaseURL[provider]
+	if !cloud && !slices.Contains(localProviders, provider) {
+		return nil, fmt.Errorf("unknown provider %q (want %s, %s, or %s)",
+			provider, strings.Join(localProviders, ", "), ProviderAnthropic, ProviderOpenAI)
+	}
+	var out []providers.ModelInfo
+	for _, b := range backends {
+		if b.Backend == provider {
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }
 
 // PrepareModel selects a model from the discovered backends: by partial
@@ -21,7 +44,20 @@ type SessionPrefs struct {
 // tool-capable local model. Hosted (Cloud) models are chosen only by name
 // or by memory, never as the default. A name like "anthropic/<id>" or
 // "openai/<id>" selects that hosted model even if it is not listed.
+//
+// A provider limits every step to that backend. Naming a hosted provider is
+// an explicit choice of it, so then a bare model ID resolves as
+// "<provider>/<id>", and with no model Anthropic's default model is used.
 func PrepareModel(prefs SessionPrefs, cfg config.Config, backends []providers.ModelInfo) (*providers.ModelInfo, error) {
+	provider := strings.ToLower(strings.TrimSpace(prefs.Provider))
+	_, cloudProvider := cloudBaseURL[provider]
+	if provider != "" {
+		var err error
+		if backends, err = filterProvider(provider, backends); err != nil {
+			return nil, err
+		}
+	}
+
 	if prefs.Model != "" {
 		want := strings.ToLower(prefs.Model)
 		for _, b := range backends {
@@ -34,9 +70,19 @@ func PrepareModel(prefs SessionPrefs, cfg config.Config, backends []providers.Mo
 				return &b, nil
 			}
 		}
-		if provider, id, ok := parseCloudRef(prefs.Model); ok {
-			m := CloudModel(provider, id)
+		if p, id, ok := parseCloudRef(prefs.Model); ok {
+			if provider != "" && p != provider {
+				return nil, fmt.Errorf("model %q is not from provider %q", prefs.Model, provider)
+			}
+			m := CloudModel(p, id)
 			return &m, nil
+		}
+		if cloudProvider {
+			m := CloudModel(provider, prefs.Model)
+			return &m, nil
+		}
+		if provider != "" {
+			return nil, fmt.Errorf("model %q not found among %d %s model(s)", prefs.Model, len(backends), provider)
 		}
 		return nil, fmt.Errorf("model %q not found among %d discovered model(s)", prefs.Model, len(backends))
 	}
@@ -48,6 +94,19 @@ func PrepareModel(prefs SessionPrefs, cfg config.Config, backends []providers.Mo
 			if b.ID == cfg.LastModel && b.URL == cfg.LastModelURL {
 				return &b, nil
 			}
+		}
+	}
+
+	switch provider {
+	case "":
+	case ProviderAnthropic:
+		m := CloudModel(provider, providers.AnthropicModels[0])
+		return &m, nil
+	case ProviderOpenAI:
+		return nil, fmt.Errorf("provider openai needs a model, e.g. --model gpt-5")
+	default:
+		if len(backends) == 0 {
+			return nil, fmt.Errorf("no %s models found; is the %s server running?", provider, provider)
 		}
 	}
 
