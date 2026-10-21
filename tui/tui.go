@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
-	"time"
+	"syscall"
+
+	"golang.org/x/term"
 
 	"kabby/internal/agent"
 	"kabby/internal/config"
@@ -32,6 +35,8 @@ type TUI struct {
 	toolsCtx *tools.ToolContext
 	plan     *plan.Plan
 	cfg      config.Config
+
+	oldState *term.State // original terminal state for restoration
 }
 
 // NewTUI creates a TUI reading from in and writing to out, connected to the
@@ -63,13 +68,34 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, a agent.Cha
 
 // Run starts the TUI event loop. Returns when the user quits.
 func (t *TUI) Run() error {
+	// Put stdin into raw mode if it's a terminal.
+	if isTerminal, ok := isTerm(t.in); ok && isTerminal {
+		oldState, err := term.MakeRaw(int(fd(t.in)))
+		if err != nil {
+			return fmt.Errorf("failed to put terminal in raw mode: %v", err)
+		}
+		t.oldState = oldState
+		defer term.Restore(int(fd(t.in)), oldState)
+	}
+
+	// Handle signals to restore terminal.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigCh
+		if t.oldState != nil {
+			term.Restore(int(fd(t.in)), t.oldState)
+		}
+		os.Exit(130)
+	}()
+
 	t.write("\033[?25l")       // hide cursor
 	defer t.write("\033[?25h") // show cursor on exit
 	defer t.write("\033[0m")   // reset attributes
 
 	// Show startup line.
 	t.write(fmt.Sprintf("kabby · %s · %s · model: %s\n", t.backend, t.mode, t.model))
-	t.write("─────────────────────────────────────────\n")
+	t.write("-----------------------------------------\n")
 
 	for !t.quit {
 		t.render()
@@ -97,12 +123,12 @@ func (t *TUI) Run() error {
 func (t *TUI) render() {
 	t.write("\033[2J\033[H") // clear screen, move to home
 	t.write(fmt.Sprintf("kabby · backend: %s · mode: %s · model: %s\n", t.backend, t.mode, t.model))
-	t.write("─────────────────────────────────────────\n")
+	t.write("-----------------------------------------\n")
 	t.write("Transcript:\n")
 	t.write("  (no transcript yet)\n")
-	t.write("─────────────────────────────────────────\n")
+	t.write("-----------------------------------------\n")
 	t.write("Input: " + t.edit.Text() + "\n")
-	t.write(fmt.Sprintf("Cursor: %d │ Keys: / slash menu, shift+tab mode, esc cancel, ctrl+c×2 quit\n", t.edit.CursorPos()))
+	t.write(fmt.Sprintf("Keys: / slash menu, shift+tab mode, esc cancel, ctrl+c x2 quit\n"))
 }
 
 // write writes to the output.
@@ -163,7 +189,7 @@ func (t *TUI) submit() {
 	}
 	t.edit.AddHistory(line)
 	t.edit.Clear()
-	t.write(fmt.Sprintf("\n> %s\n", line))
+	t.write(fmt.Sprintf("\r\n> %s\r\n", line))
 	if line == "/exit" || line == ":q" {
 		t.quit = true
 		return
@@ -171,7 +197,7 @@ func (t *TUI) submit() {
 
 	// Send the prompt to the model via the agent.
 	if t.agent != nil {
-		t.write("…\n")
+		t.write("…\r\n")
 		req := providers.ChatRequest{
 			Model:         t.model,
 			Messages:      []providers.ChatMessage{{Role: "user", Content: line}},
@@ -181,13 +207,13 @@ func (t *TUI) submit() {
 		}
 		results, err := t.agent.Chat(context.Background(), req)
 		if err != nil {
-			t.write(fmt.Sprintf("error: %v\n", err))
+			t.write(fmt.Sprintf("error: %v\r\n", err))
 			return
 		}
 		var sb strings.Builder
 		for result := range results {
 			if result.Err != nil {
-				t.write(fmt.Sprintf("error: %v\n", result.Err))
+				t.write(fmt.Sprintf("error: %v\r\n", result.Err))
 				return
 			}
 			sb.WriteString(result.Content)
@@ -195,9 +221,9 @@ func (t *TUI) submit() {
 				break
 			}
 		}
-		t.write(sb.String() + "\n")
+		t.write(sb.String() + "\r\n")
 	} else {
-		t.write("(no model connected)\n")
+		t.write("(no model connected)\r\n")
 	}
 }
 
@@ -207,5 +233,22 @@ func RunStdin() error {
 	return t.Run()
 }
 
-var _ = time.Second
-var _ = providers.ModeEdit
+// isTerm reports whether r is a terminal and returns (true, true) if so,
+// (false, true) if it's not a terminal, or (false, false) if we can't tell.
+func isTerm(r io.Reader) (bool, bool) {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false, false
+	}
+	return term.IsTerminal(int(f.Fd())), true
+}
+
+// fd returns the file descriptor of an *os.File wrapped in an io.Reader.
+func fd(r io.Reader) uintptr {
+	if f, ok := r.(*os.File); ok {
+		return f.Fd()
+	}
+	return 0
+}
+
+var _ = context.Background
