@@ -7,7 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/vicgupta/kabby/main/install.sh | sh
 set -eu
 
-VERSION="${KABBY_VERSION:-v0.8.1}"
+VERSION="${KABBY_VERSION:-v0.8.2}"
 REPO="vicgupta/kabby"
 
 # Detect OS

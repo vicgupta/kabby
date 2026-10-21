@@ -184,7 +184,7 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.8.1 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write(fmt.Sprintf("kabby v0.8.2 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
 	if t.info.Cloud {
 		t.write(fmt.Sprintf("note: %s is a hosted model; prompts and file contents are sent to %s.\r\n", t.model, t.url))
 	}
