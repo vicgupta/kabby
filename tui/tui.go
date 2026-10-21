@@ -19,7 +19,7 @@ import (
 	"kabby/internal/tools"
 )
 
-// TUI is the raw-mode terminal user interface.
+// TUI is the terminal user interface.
 type TUI struct {
 	in   io.Reader
 	out  io.Writer
@@ -36,7 +36,8 @@ type TUI struct {
 	plan     *plan.Plan
 	cfg      config.Config
 
-	oldState *term.State // original terminal state for restoration
+	raw      bool // whether raw mode is active
+	oldState *term.State
 }
 
 // NewTUI creates a TUI reading from in and writing to out, connected to the
@@ -68,12 +69,14 @@ func NewTUI(in io.Reader, out io.Writer, model, backend, url string, a agent.Cha
 
 // Run starts the TUI event loop. Returns when the user quits.
 func (t *TUI) Run() error {
-	// Put stdin into raw mode if it's a terminal.
+	// Put stdin into raw mode if it's a terminal, so we can read keys
+	// character by character (needed for esc, shift+tab, etc.).
 	if isTerminal, ok := isTerm(t.in); ok && isTerminal {
 		oldState, err := term.MakeRaw(int(fd(t.in)))
 		if err != nil {
 			return fmt.Errorf("failed to put terminal in raw mode: %v", err)
 		}
+		t.raw = true
 		t.oldState = oldState
 		defer term.Restore(int(fd(t.in)), oldState)
 	}
@@ -83,22 +86,18 @@ func (t *TUI) Run() error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sigCh
-		if t.oldState != nil {
+		if t.raw && t.oldState != nil {
 			term.Restore(int(fd(t.in)), t.oldState)
 		}
 		os.Exit(130)
 	}()
 
-	t.write("\033[?25l")       // hide cursor
-	defer t.write("\033[?25h") // show cursor on exit
-	defer t.write("\033[0m")   // reset attributes
-
-	// Show startup line.
-	t.write(fmt.Sprintf("kabby · %s · %s · model: %s\n", t.backend, t.mode, t.model))
-	t.write("-----------------------------------------\n")
+	// Show startup banner (no screen clearing, just append).
+	t.write(fmt.Sprintf("kabby v0.7.2 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write("Type /help for commands, /exit to quit.\r\n\r\n")
 
 	for !t.quit {
-		t.render()
+		t.prompt()
 		data := make([]byte, 64)
 		n, err := t.in.Read(data)
 		if err != nil {
@@ -119,16 +118,9 @@ func (t *TUI) Run() error {
 	return nil
 }
 
-// render draws the full UI.
-func (t *TUI) render() {
-	t.write("\033[2J\033[H") // clear screen, move to home
-	t.write(fmt.Sprintf("kabby · backend: %s · mode: %s · model: %s\n", t.backend, t.mode, t.model))
-	t.write("-----------------------------------------\n")
-	t.write("Transcript:\n")
-	t.write("  (no transcript yet)\n")
-	t.write("-----------------------------------------\n")
-	t.write("Input: " + t.edit.Text() + "\n")
-	t.write(fmt.Sprintf("Keys: / slash menu, shift+tab mode, esc cancel, ctrl+c x2 quit\n"))
+// prompt draws the input line.
+func (t *TUI) prompt() {
+	t.write("\r\n> " + t.edit.Text())
 }
 
 // write writes to the output.
@@ -144,30 +136,45 @@ func (t *TUI) handleKey(key Key) {
 	case key.Code == "escape":
 		// Clear input on esc.
 		t.edit.Clear()
+		t.write("\r> ")
 	case key.Code == "backtab":
 		// shift+tab: cycle ro → edit → bypass
 		t.cycleMode()
+		t.write(fmt.Sprintf("\r\nmode: %s\r\n> ", t.mode))
 	case key.Code == "enter":
 		t.submit()
 	case key.Code == "backspace":
 		t.edit.Backspace()
+		if t.raw {
+			t.write("\b \b")
+		}
 	case key.Code == "delete":
 		t.edit.DeleteRune()
 	case key.Code == "left":
 		t.edit.MoveLeft()
+		if t.raw {
+			t.write("\033[D")
+		}
 	case key.Code == "right":
 		t.edit.MoveRight()
+		if t.raw {
+			t.write("\033[C")
+		}
 	case key.Code == "home":
 		t.edit.MoveHome()
 	case key.Code == "end":
 		t.edit.MoveEnd()
 	case key.Ctrl && key.Rune == 'u':
 		t.edit.Clear()
+		t.write("\r> ")
 	case key.Ctrl && key.Rune == 'l':
 		// Ctrl+L: clear screen
 		t.write("\033[2J\033[H")
 	case key.Rune != 0:
 		t.edit.InsertRune(key.Rune)
+		if t.raw {
+			t.write(string(key.Rune))
+		}
 	}
 }
 
@@ -185,6 +192,7 @@ func (t *TUI) cycleMode() {
 func (t *TUI) submit() {
 	line := strings.TrimSpace(t.edit.Text())
 	if line == "" {
+		t.write("\r> ")
 		return
 	}
 	t.edit.AddHistory(line)
@@ -208,12 +216,14 @@ func (t *TUI) submit() {
 		results, err := t.agent.Chat(context.Background(), req)
 		if err != nil {
 			t.write(fmt.Sprintf("error: %v\r\n", err))
+			t.write("\r> ")
 			return
 		}
 		var sb strings.Builder
 		for result := range results {
 			if result.Err != nil {
 				t.write(fmt.Sprintf("error: %v\r\n", result.Err))
+				t.write("\r> ")
 				return
 			}
 			sb.WriteString(result.Content)
@@ -250,5 +260,3 @@ func fd(r io.Reader) uintptr {
 	}
 	return 0
 }
-
-var _ = context.Background
