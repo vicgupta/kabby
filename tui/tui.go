@@ -93,7 +93,7 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.7.5 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write(fmt.Sprintf("kabby v0.7.7 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
 	t.write("Type /help for commands, /exit to quit.\r\n")
 
 	// Print the initial prompt.
@@ -120,6 +120,12 @@ func (t *TUI) Run() error {
 	return nil
 }
 
+// redrawLine clears the current line and re-prints the prompt + text.
+// Used after backspace/delete so the display stays in sync.
+func (t *TUI) redrawLine() {
+	t.write("\r\033[K> " + t.edit.Text())
+}
+
 // write writes to the output.
 func (t *TUI) write(s string) {
 	io.WriteString(t.out, s)
@@ -141,9 +147,8 @@ func (t *TUI) handleKey(key Key) {
 	case key.Code == "enter":
 		t.submit()
 	case key.Code == "backspace":
-		t.edit.Backspace()
-		if t.raw {
-			t.write("\b \b")
+		if t.edit.Backspace() {
+			t.redrawLine()
 		}
 	case key.Code == "delete":
 		t.edit.DeleteRune()
@@ -228,11 +233,74 @@ func (t *TUI) submit() {
 				break
 			}
 		}
-		t.write(sb.String() + "\r\n")
+		t.write(renderMarkdown(sb.String()) + "\r\n")
 	} else {
 		t.write("(no model connected)\r\n")
 	}
 	t.write("> ")
+}
+
+// renderMarkdown converts basic markdown to plain text suitable for a terminal.
+func renderMarkdown(md string) string {
+	lines := strings.Split(md, "\n")
+	var out []string
+	inCodeBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Code block fences.
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock {
+			out = append(out, line)
+			continue
+		}
+		// Horizontal rule.
+		if strings.TrimSpace(line) == "---" || strings.TrimSpace(line) == "***" {
+			out = append(out, "-----------------------------------------")
+			continue
+		}
+		// Headers.
+		if strings.HasPrefix(trimmed, "# ") {
+			out = append(out, strings.TrimPrefix(trimmed, "# "))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "## ") {
+			out = append(out, strings.TrimPrefix(trimmed, "## "))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "### ") {
+			out = append(out, strings.TrimPrefix(trimmed, "### "))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#### ") {
+			out = append(out, strings.TrimPrefix(trimmed, "#### "))
+			continue
+		}
+		// Bullet lists (check before stripping inline markers so * is preserved).
+		if strings.HasPrefix(trimmed, "- ") {
+			out = append(out, "  * "+stripInline(strings.TrimPrefix(trimmed, "- ")))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "* ") {
+			out = append(out, "  * "+stripInline(strings.TrimPrefix(trimmed, "* ")))
+			continue
+		}
+		// Strip inline formatting markers.
+		out = append(out, stripInline(line))
+	}
+	return strings.Join(out, "\n")
+}
+
+// stripInline removes bold/italic/code markers from a line of text.
+func stripInline(s string) string {
+	s = strings.ReplaceAll(s, "**", "")
+	s = strings.ReplaceAll(s, "__", "")
+	s = strings.ReplaceAll(s, "*", "")
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "`", "")
+	return s
 }
 
 // RunStdin runs the TUI using os.Stdin and os.Stdout with no model connected.

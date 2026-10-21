@@ -24,7 +24,7 @@ import (
 	"kabby/tui"
 )
 
-const version = "0.7.5"
+const version = "0.7.7"
 
 func main() {
 	os.Exit(run(os.Args[1:]))

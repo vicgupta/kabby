@@ -45,13 +45,14 @@ func (e *Editor) DeleteRune() {
 	e.buf.WriteString(string(runes[e.pos+1:]))
 }
 
-// Backspace deletes the rune before the cursor.
-func (e *Editor) Backspace() {
+// Backspace deletes the rune before the cursor. Returns true if a rune was deleted.
+func (e *Editor) Backspace() bool {
 	if e.pos <= 0 {
-		return
+		return false
 	}
 	e.pos--
 	e.DeleteRune()
+	return true
 }
 
 // MoveLeft moves the cursor left.
