@@ -5,10 +5,25 @@ Single static Go binary, no account, no API key, no config file required.
 
 ## Install
 
-Download a static release binary for your platform, or build from source:
+### One-liner (copy & paste)
 
 ```sh
-git clone <repo>
+curl -fsSL https://raw.githubusercontent.com/vicgupta/kabby/main/install.sh | sh
+```
+
+This detects your OS/arch, downloads the matching static binary from the
+GitHub release, and installs it to `/usr/local/bin` (or `~/.local/bin`).
+
+### Or download manually
+
+Static binaries for linux/amd64, darwin/amd64, darwin/arm64, windows/amd64:
+
+https://github.com/vicgupta/kabby/releases/latest
+
+### Or build from source
+
+```sh
+git clone https://github.com/vicgupta/kabby.git
 cd kabby
 make build
 ./kabby --help
