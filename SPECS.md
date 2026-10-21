@@ -1,14 +1,12 @@
-# SPECS.md — kabby (Go)
+# SPECS.md — kabby
 
-Build specification for **kabby**: a zero-dependency-at-runtime, zero-config CLI
-coding agent for local models (Ollama, LM Studio, oMLX, MTPLX), reimplemented as a
-single statically-linked **Go** binary.
+Build specification for **kabby**: a zero-config CLI coding agent for local models
+(Ollama, LM Studio, oMLX, MTPLX), shipped as a single statically-linked Go binary.
 
-This document translates SPECS2.md (the TypeScript/Node specification, v0.7.1,
-renamed to `kabby`) into Go terms: packages instead of `src/` modules,
-`go build`/`go test` instead of npm scripts, standard-library-first runtime, and one
-compiled `kabby` binary. Product behavior, invariants, and acceptance criteria are
-unchanged unless explicitly noted as Go-specific.
+kabby began as a TypeScript/Node codebase (v0.7.1). This spec is the Go rewrite of
+that design. Product behavior, invariants, and acceptance criteria carry over
+unchanged; only the language, layout, and tooling differ. The original Node spec is
+in git history (`SPECS2.md`, removed in the consolidation commit).
 
 ## 0. How to use this spec
 
@@ -18,18 +16,9 @@ Build in **Phases 0–14 in order**. Each phase:
 2. ends with a runnable build (`go build ./...`) and green tests (`go test ./...`),
 3. lists acceptance criteria (AC) checkable without a live model server.
 
-Tests use Go stdlib `testing` plus `net/http/httptest` stubs (zero runtime
-dependencies). Tests point at a scratch config via `KABBY_CONFIG` so they never
-touch `~/.kabby.json`.
-
-Target: every phase AC is machine-checkable against the source tree. When a phase
-depends on a provider/model server, stub it locally (see §6 "Test harness").
-
-Decisions baked into this Go translation (answered in §9):
-
-- Module `kabby`; Go 1.22 minimum (`go` directive in `go.mod`).
-- One binary `kabby`, built with `CGO_ENABLED=0` for a fully static, dependency-free runtime.
-- Build-time third-party modules are allowed (compiled into the binary); nothing is required at runtime.
+Tests use Go stdlib `testing` plus `net/http/httptest` stubs. They point at a scratch
+config via `KABBY_CONFIG` (a `t.TempDir()` file) so they never touch `~/.kabby.json`.
+When a phase depends on a model server, stub it (§5).
 
 ---
 
@@ -37,10 +26,10 @@ Decisions baked into this Go translation (answered in §9):
 
 ### 1.1 One-line spec
 
-A Go ≥ 1.22 CLI binary (`kabby`) that detects whatever local model server is
-already running, hands it eight small tools, and drives a read → edit → run → verify
-agent loop inside the user's project folder — in a terminal TUI, a browser UI
-(`--web`), or headless (`-p "prompt"`).
+A Go CLI binary (`kabby`) that detects whatever local model server is already
+running, hands it eight small tools, and drives a read → edit → run → verify agent
+loop inside the user's project folder — in a terminal TUI, a browser UI (`--web`), or
+headless (`-p "prompt"`).
 
 ### 1.2 User stories
 
@@ -54,9 +43,9 @@ agent loop inside the user's project folder — in a terminal TUI, a browser UI
 
 ### 1.3 Goals
 
-- **Zero config.** `go install` / copy the binary, then `kabby` works with no
-  account, no API key (except oMLX/MTPLX's own), and no config file. Server
-  discovery, model pick, and permission defaults are automatic.
+- **Zero config.** Install the binary, then `kabby` works with no account, no API key
+  (except oMLX/MTPLX's own), and no config file. Server discovery, model pick, and
+  permission defaults are automatic.
 - **Designed for small local models.** Short system prompt, flat tool schemas with
   example calls, bounded tool output, harness-held state that survives compaction.
 - **Privacy.** Requests go only to servers the user chose: local ones, or network
@@ -74,79 +63,65 @@ agent loop inside the user's project folder — in a terminal TUI, a browser UI
 
 ### 1.5 Constraints
 
-- **Go-only runtime.** Third-party build-time deps are OK (compiled into the static
-  binary; e.g. bubbletea for the TUI); the shipped binary uses Go builtins only at
-  runtime (`CGO_ENABLED=0` for a fully static binary).
+- **Static binary, no runtime deps.** Build with `CGO_ENABLED=0`. Third-party modules
+  are allowed at build time only (currently `golang.org/x/term`).
+- Go version: whatever the `go` directive in `go.mod` says (currently 1.26).
 - Every command and file access is confined to the workspace by path resolution
   (`internal/sandbox`); anything resolving outside requires approval in `edit` mode.
-- `bypass` mode is never persisted across sessions (`loadConfig` silently coerces a
+- `bypass` mode is never persisted across sessions (`LoadConfig` silently coerces a
   saved `bypass`/`yolo` back to `edit`).
-- Go ≥ 1.22 (`go` directive in `go.mod`).
 
 ---
 
-## 2. Architecture map (Go packages)
+## 2. Architecture map
 
 ```
-cmd/kabby/         CLI entry: parseArgs, help/version, three run paths
-                   (headless / web / TUI)
-internal/agent/    THE agent loop: tool-call batching, checks, recovery,
-                   verify gate, stats
-internal/context/  Context window budgeting, tier-1 eviction, tier-2 handover
-                   compaction
-internal/prompt/   System prompt builder + AGENTS.md loader (8k char cap)
-internal/plan/     Harness-held checklist (≤20 steps, per-step checkpoint ≤1000
-                   chars)
-internal/tools/    Tool registry: 4 read tools + 4 write/exec tools by mode
-internal/tools/fs.go       read_file, list_files, write_file, edit_file
-internal/tools/shell.go    run_command (120 s timeout), pickShell
-internal/tools/tasks.go    background task manager (dev servers: start/list/
-                   logs/stop, killAll on exit)
-internal/tools/check.go    post-write syntax check (Go/JS/JSON/HTML/Python)
-internal/sandbox/  Path confinement + command reach-out text check + approval
-internal/providers/ Backend abstraction: types, transport, ollama, lmstudio,
-                   scheduler
-internal/detect/   Local server discovery (ports, docker, WSL/container gateways)
-internal/hosts/    Saved remote machines + probes
-internal/network/  Remote host helpers
-internal/netscan/  On-demand TCP subnet sweep
-internal/omlx/     oMLX specifics (health, keys, ports from settings)
-internal/mtplx/    MTPLX specifics (health, keys, ports from settings)
-internal/config/   ~/.kabby.json (lastModel+URL, mode, effort, hosts, keys;
-                   chmod 600)
-internal/history/  Transcript model, append/evict bookkeeping
-internal/events/   EventBus (compaction notices etc.)
-internal/ui/       Common print/status/warn sink used by all surfaces
-tui/               Raw-mode terminal UI, editor, key handling
-web/               hub (SSE server), client, page, styles, channel, store,
-                   terminal, attachments
+cmd/kabby/            CLI entry: parseArgs, help/version, three run paths
+                      (headless / web / TUI)
+internal/agent/       THE agent loop: tool-call batching, checks, recovery,
+                      verify gate, stats
+internal/context/     context.go  window budgeting, tier-1 eviction, tier-2 handover
+                      history.go  transcript model, append/evict bookkeeping
+internal/prompt/      System prompt builder + AGENTS.md loader (8k char cap)
+internal/plan/        Harness-held checklist (≤20 steps, per-step note ≤1000 chars)
+internal/tools/       index.go    registry: 4 read tools + 4 write/exec tools by mode
+                      tool.go     ToolContext and shared tool types
+                      fs.go       read_file, list_files, write_file, edit_file
+                      search.go   bounded search
+                      shell.go    run_command (120 s timeout), PickShell
+                      tasks.go    background tasks (start/list/logs/stop, KillAll)
+                      check.go    post-write syntax check (Go/JS/JSON/HTML/Python)
+internal/sandbox/     Path confinement + command reach-out text check + approval
+internal/providers/   types, transport, ollama, lmstudio, scheduler
+internal/detect/      detect.go   local discovery (ports, docker, WSL/container gateways)
+                      hosts.go / network.go   saved remote machines + probes
+                      netscan.go  on-demand TCP subnet sweep
+                      omlx.go / mtplx.go      health identity, keys, ports from settings
+internal/config/      ~/.kabby.json (lastModel+URL, mode, effort, hosts, keys; 0600)
+internal/session/     Model prep/selection, prefs, advice lines, slash-command glue
+internal/events/      EventBus (compaction notices etc.)
+internal/ui/          Common print/status/warn sink used by all surfaces
+internal/util/        ANSI helpers, truncateMiddle
+tui/                  Raw-mode terminal UI: tui.go, editor.go, keys.go
+web/                  hub (SSE server), client, page, styles, store
+bench/                run.sh scenarios keyed off the [stats] line
 ```
 
-### 2.1 Type contracts to implement (Go)
+### 2.1 Type contracts
 
 ```go
 // internal/providers/types.go
-package providers
-
-type Mode string
-
-const (
-    ModeRO     Mode = "ro"
-    ModeEdit   Mode = "edit"
-    ModeBypass Mode = "bypass"
-)
-
-type Effort string // "off" | "low" | "medium" | "high" | "" (null = default)
+type Mode string // "ro" | "edit" | "bypass"
+type Effort string // "off" | "low" | "medium" | "high"; "" = backend default
 
 type ToolSpec struct {
     Name        string
     Description string
-    Parameters  any // flat schema (no nested objects/arrays)
+    Parameters  any // flat schema: no nested objects/arrays
 }
 
 type ModelInfo struct {
-    ID              string
-    Name            string
+    ID, Name        string
     Backend         string // ollama | lmstudio | omlx | mtplx
     URL             string
     ToolsSupported  bool
@@ -155,89 +130,63 @@ type ModelInfo struct {
     DefaultEffort   Effort
 }
 
-// internal/plan.go
-package plan
+// internal/plan/plan.go
+type PlanStep struct { Text string; Done bool; Note string /* ≤1000 chars */ }
 
-type PlanStep struct {
-    Text  string
-    Done  bool
-    Note  string // ≤1000 chars
-}
-
-type Plan struct {
-    steps []PlanStep
-}
-
+func New() *Plan
 func (p *Plan) Exists() bool
 func (p *Plan) DoneCount() int
 func (p *Plan) CurrentIndex() int
 func (p *Plan) Reset()
-func (p *Plan) Set(stepsText string) string        // "Plan set (N steps). Current: 1. ..."
-func (p *Plan) MarkDone(stepNumber *int) string    // nil ⇒ current step; restates next
+func (p *Plan) Set(stepsText string) string     // "Plan set (N steps). Current: 1. ..."
+func (p *Plan) MarkDone(stepNumber *int) string // nil ⇒ current step; restates next
 func (p *Plan) Add(text string) string
-func (p *Plan) Checkpoint(text string) string      // 1–1000 chars, replaces current note
+func (p *Plan) Show() string
+func (p *Plan) Checkpoint(text string) string   // 1–1000 chars, replaces current note
 func (p *Plan) ModelView() string
-func (p *Plan) CompactLine() string | nil
+func (p *Plan) CompactLine() (string, bool)
 func (p *Plan) PendingSummary() string
 
-// internal/config.go
-package config
-
+// internal/config/config.go
 type Config struct {
-    LastModel     string
-    LastModelURL  string // same model id on two machines stays apart
-    LastMode      Mode
-    Effort        *Effort
-    Hosts         []SavedHost
-    Keys          map[string]string
+    LastModel    string
+    LastModelURL string // same model id on two machines stays apart
+    LastMode     Mode
+    Effort       *Effort
+    Hosts        []SavedHost
+    Keys         map[string]string
 }
+type SavedHost struct { Address, Name string }
 
-type SavedHost struct {
-    Address string
-    Name    string
-}
-
-const (
-    CONFIG_PATH string // ~/.kabby.json
-    DATA_DIR    string // ~/.kabby
-)
-
-func LoadConfig() Config
-func SaveConfig(cfg Config) error          // chmod 0600 before first key write
-func UpdateConfig(patch map[string]any) Config // merge by re-reading
+func SetConfigPath(path string) // "" ⇒ ~/.kabby.json; set from KABBY_CONFIG
+func LoadConfig() (Config, error)
+func SaveConfig(cfg Config) error                            // chmod 0600 before first key write
+func UpdateConfig(patch func(Config) Config) (Config, error) // re-reads, then merges
 func SavedKey(base string) (string, bool)
-func SetKeys(bases []string, key string)
+func SetKeys(bases []string, key string) error
 
-// internal/session.go
-package session
-
-type SessionPrefs struct {
-    Mode     Mode
-    Model    string
-    CTX      int
-    Effort   *Effort
-}
+// internal/session/session.go
+type SessionPrefs struct { Mode Mode; Model string; Ctx int; Effort *Effort }
 
 func PrepareModel(prefs SessionPrefs, cfg config.Config, onLabel func(string)) (*BackendHandle, error)
 func EffortAdvice(chosen, setting Effort) string
 func NoBackendsMessage() string
 func SessionLine(chosen ModelInfo, mode Mode) string
 
-// internal/tools/index.go
-package tools
-
+// internal/tools
 type ToolContext struct {
-    Workspace        string
-    TaskManager      *TaskManager
-    Plan             *plan.Plan
-    FilesTouched     map[string]bool
-    CommandsRun      []string
-    ResultCharLimit  int
+    Workspace       string
+    TaskManager     *TaskManager
+    Plan            *plan.Plan
+    FilesTouched    map[string]bool
+    CommandsRun     []string
+    ResultCharLimit int
 }
 
-func BuildToolSpecs(mode Mode) []providers.ToolSpec
-func ExecuteTool(name string, args any, ctx *ToolContext, signal <-chan struct{}) (string, error)
-func CommandOf(name string, args any) string | nil
+func BuildToolSpecs(mode providers.Mode) []providers.ToolSpec
+func ExecuteTool(name string, args map[string]any, ctx *ToolContext, signal <-chan struct{}) (string, error)
+func AfterWrite(path, content string) string
+func CommandOf(name string, args map[string]any) *string // nil ⇒ not an exec tool
 ```
 
 ### 2.2 Key invariants
@@ -247,7 +196,7 @@ func CommandOf(name string, args any) string | nil
    cannot destroy it.
 2. **Coding inference always wins the backend.** Background work (handover summaries,
    session titles) yields/defers to a foreground call — one inference slot per server
-   URL per process (`internal/providers/scheduler`).
+   URL per process (`internal/providers/scheduler.go`).
 3. **No fabricated history.** Applied `write_file` bodies become marked harness
    records, not re-imagined assistant text; malformed/cut-off tool calls are never
    executed partially.
@@ -259,8 +208,7 @@ func CommandOf(name string, args any) string | nil
 
 ## 3. Functional requirements by subsystem
 
-### 3.1 Server discovery (`internal/detect`, `internal/hosts`, `internal/network`,
-`internal/netscan`, `internal/omlx`, `internal/mtplx`)
+### 3.1 Server discovery (`internal/detect`)
 
 - **Identify by response, never by port.** `/api/tags` ⇒ Ollama; `/api/v1/models`
   (or older catalog) ⇒ LM Studio; `/health` with `engine_pool` ⇒ oMLX (needs key);
@@ -272,16 +220,16 @@ func CommandOf(name string, args any) string | nil
   gateway and `host.docker.internal`. Spellings of one port collapse to one server.
 - **oMLX/MTPLX ports and keys** come from their own settings files on this computer;
   a key is prompted only when adding the machine remotely. `OMLX_API_KEY` /
-  `MTPLX_API_KEY` are fallbacks. Port 8000 is probed only on local macOS (oMLX /
-  MTPLX share it by default).
+  `MTPLX_API_KEY` are fallbacks. Port 8000 is probed only on local macOS
+  (`runtime.GOOS == "darwin"`; oMLX and MTPLX share it by default).
 - **Remote hosts** (saved in `~/.kabby.json` as `{address, name?}`): a bare host tries
   both usual ports; `host:port` or a URL names one server. Hosts are probed with the
   local ones at startup (1.5 s timeout); startup search ends early once the remembered
   model appears; local models win when nothing is remembered.
 - **"Search my network"** runs only on demand (never at startup, never headless):
   TCP-connect sweep of private IPv4 subnets, 64 at a time, 350 ms timeout, both ports;
-  > /22 narrows to the /24 around this machine. Found machines show name, IP, backend,
-  model count; the machine name is saved when it round-trips.
+  subnets larger than /22 narrow to the /24 around this machine. Found machines show
+  name, IP, backend, model count; the machine name is saved when it round-trips.
 - **Chat-only marking:** models without tool support are listed but get the chat-only
   prompt and no tools.
 
@@ -294,14 +242,18 @@ func CommandOf(name string, args any) string | nil
   OpenAI-compatible streaming with tools; native load API when an unloaded model gets
   explicit `--ctx`; never reload an already-loaded model just to enlarge the window.
 - **Reasoning effort mapping:** `off` ⇒ `none` on LM Studio, `no_think`-style switch
-  on Ollama; snap requested level to the model's actual supported set; one saved
+  on Ollama; snap the requested level to the model's actual supported set; one saved
   `effort` in config (known wart — see §7).
-- **Transport limits:** 3-minute silence timeout, 15-minute total deadline, ≤3
-  transient retries with cancellable backoff, one context-overflow recovery via forced
-  compaction, repeated empty-response stop, no partial tool-call execution.
+- **Transport limits:** `net/http` with `context.Context` cancellation; 3-minute
+  silence timeout, 15-minute total deadline, ≤3 transient retries with cancellable
+  backoff, one context-overflow recovery via forced compaction, repeated
+  empty-response stop. Streams buffer until complete before any tool call is
+  dispatched — no partial tool-call execution.
 - **Reasoning-exhaustion recovery:** if thinking consumed the whole reply, retry once
-  with thinking off; repeat escalates the interval (1 → 2 → max 4 → max 8 responses),
-  then retries the session's chosen effort without changing the preference.
+  with thinking off; repeats escalate the interval (1 → 2 → max 4 → max 8 responses),
+  then retry the session's chosen effort without changing the preference.
+
+Per-backend detail lives in `docs/backend-notes.md`.
 
 ### 3.3 Tools (`internal/tools`)
 
@@ -310,45 +262,46 @@ func CommandOf(name string, args any) string | nil
   - edit/bypass adds: `write_file`, `edit_file`, `run_command`, `task`
 - Every schema: flat parameters (no nested objects/arrays), an example call in the
   description, bounded returns (`read_file` paginates with a continuation line;
-  results pass `truncateMiddle` at a 10k-char final cap; `search` runs bounded in a
-  worker/goroutine).
+  results pass `truncateMiddle` at a 10k-char final cap, `TOOL_RESULT_CAP`; `search`
+  runs bounded in a goroutine).
 - `edit_file` failures return a bounded source range + guidance; shell pipelines
-  preserve upstream exit codes; long logs keep beginning and final error.
+  preserve upstream exit codes; long logs keep the beginning and the final error.
 - `run_command` waits (120 s); long-lived processes go through `task` start/
-  list/logs/stop; all tasks killed on exit and on SIGTERM/SIGHUP/SIGINT.
-- **Post-write hook:** `write_file`/`edit_file` on Go/JS/JSON/HTML-inline-script/
-  Python run a parse check; first error rides back on the success message with a line
-  number.
+  list/logs/stop; all tasks are killed on exit and on SIGTERM/SIGHUP/SIGINT.
+- **Post-write hook:** `write_file`/`edit_file` on Go (`go/parser`), JS, JSON,
+  HTML-inline-script, and Python run a parse check; the first error rides back on the
+  success message with a line number.
 - `plan` actions: `set` (accepts `\n` **or** semicolon lists; strips bullets/
   numbering; ≤20 steps), `done` (no index = current step; reply restates the next
   step), `add`, `show`, `checkpoint` (1–1000 chars, replaces the current step's note,
-  re-injected with the active step). After four non-plan tool calls with unfinished
-  work, attach a short reminder to the tool result.
+  re-injected with the active step). Every action returns a small self-teaching string
+  with an example. After four non-plan tool calls with unfinished work, attach a short
+  reminder to the tool result.
 
 ### 3.4 Sandbox / modes (`internal/sandbox`)
 
-- All paths resolve inside the workspace; resolution errors become tool-error strings,
-  never crashes.
+- All paths resolve inside the workspace (`..`, absolute paths, and symlink escapes
+  rejected); resolution errors become tool-error strings, never crashes.
 - Mode gate: `ro` sends only read tools (and the agent rechecks mode at execution
   time); `edit` runs commands freely *inside* the workspace and text-checks for
   reach-out (home dir, other folders, global installs) → y/n approval prompt stating
   why; `bypass` never asks.
 
-### 3.5 Context management (`internal/context`, `internal/history`)
+### 3.5 Context management (`internal/context`)
 
 - **Budget:** `reply_reserve = clamp(⌊window/4⌋, 128, 8192)`,
   `safety = min(256, ⌊window·0.05⌋)`, input budget = window − reserve − safety.
-  Counts anchored by real backend usage after each response; estimates between.
+  Counts are anchored by real backend usage after each response; estimates between.
 - **Tier 1 eviction** (trigger: >80% of the input budget; target: back to 60%): drop
   old reasoning, applied write bodies (kept as marked records), old tool output;
-  replace stale reads of overwritten files with stubs immediately; newest tool group
-  protected; repeated-read guard counts only evidence still in context.
+  replace stale reads of overwritten files with stubs immediately; the newest tool
+  group is protected; the repeated-read guard counts only evidence still in context.
 - **Tier 2 handover:** harness facts section (current + original request, plan first,
   `filesTouched`, recent command outcomes) + a model-written narrative (thinking off,
   no tools, ≤700 tokens, ≤45 s, three headings: In progress / Next / Notes, character
   cap). On failure or tiny windows: facts-only fallback. Whole groups are trimmed above
-  the hard budget; futile repeated summaries suppressed while the final fit check stays
-  active.
+  the hard budget; futile repeated summaries are suppressed while the final fit check
+  stays active.
 - **Background handover:** at >60% with enough history, during a still-running
   `run_command` (past 750 ms), snapshot the frozen prefix and prepare the handover on
   the same model; reuse it only if the prefix is unchanged, the result is smaller, and
@@ -363,30 +316,34 @@ func CommandOf(name string, args any) string | nil
 
 - Turns: system prompt + AGENTS.md (message[0], survives compaction) + budgeted
   history ⇒ model ⇒ execute returned tool calls (bounded results ride back) ⇒ repeat
-  until final answer.
-- **Project checks:** after file edits, run available project scripts `build`,
-  `test`, `test:e2e` (Go: `go build ./...`, `go test ./...`); also every 24 tool calls
-  during longer implementations; not rerun for unrelated Q&A.
-- **Acceptance gate (`--verify`):** caller-owned command must pass before the run
-  counts done; failures feed back as repair evidence with the original request + plan +
-  actual failure emphasized; 2 consecutive *equivalent* failures (numbers/whitespace
-  insensitive) in a fresh conversation trigger a facts-only compaction even under 80%;
-  attempts budget 6 (12 via `--verify-attempts`); each check has the normal 120 s
-  deadline; exhaustion or cancellation exits nonzero. Seed recovery from repeated tool
-  failures with a known failing check when available. Chat-only models refuse
-  immediately.
-- **Reminder nudges:** plan reminders on tool results (§3.3), bounded continuation
+  until a final answer.
+- **Project checks:** after file edits, run the project's build and test (Go:
+  `go build ./...`, `go test ./...`; npm projects: scripts `build`, `test`,
+  `test:e2e`); also every 24 tool calls during longer implementations; not rerun for
+  unrelated Q&A.
+- **Acceptance gate (`--verify`):** the caller-owned command must pass before the run
+  counts as done; failures feed back as repair evidence with the original request +
+  plan + actual failure emphasized; 2 consecutive *equivalent* failures
+  (numbers/whitespace insensitive) in a fresh conversation trigger a facts-only
+  compaction even under 80%; attempt budget 6 (up to 12 via `--verify-attempts`);
+  each check has the normal 120 s deadline; exhaustion or cancellation exits nonzero.
+  Seed recovery from repeated tool failures with a known failing check when available.
+  Chat-only models refuse immediately.
+- **Reminder nudges:** plan reminders on tool results (§3.3), a bounded continuation
   nudge on a premature final answer, coach-not-scold wording everywhere (e.g.
   oversized `write_file` ⇒ "not executed; write it in parts").
-- **Stats:** every turn ends with tool count, tokens, tok/s; headless emits a single
-  `[stats] {…}` JSON line on stderr for benchmarks.
+- **Stats:** every turn ends with tool count, tokens, tok/s (`LastTurnStats`,
+  `Outcome`, `VerificationResult`); headless emits a single `[stats] {…}` JSON line on
+  stderr for benchmarks (tools called, input/output/total tokens, tok/s, duration,
+  verification status).
 
 ### 3.7 Config & memory (`internal/config`, `internal/prompt`)
 
 - `~/.kabby.json`, mode 0600, holds `lastModel` **+ `lastModelUrl`** (same model id on
   two machines stays apart), `lastMode` (bypass reset to edit), `effort`, `hosts[]`,
-  `keys{}` (kept even when the file pre-existed; chmod before the first key write),
-  and `UpdateConfig` merges by re-reading (web sessions share the file).
+  `keys{}` (kept even when the file pre-existed; chmod before the first key write).
+  `UpdateConfig` merges by re-reading (web sessions share the file). Data dir:
+  `~/.kabby/`.
 - `AGENTS.md` at the workspace root loads into message[0] after the system prompt,
   capped at 8000 chars (~2k tokens), chat-only-safe.
 
@@ -409,6 +366,7 @@ func CommandOf(name string, args any) string | nil
 
 - `kabby --web [port]` (default 7433), localhost-only, URL carries a random token; a
   second `kabby --web` hands its folder to the running hub and exits.
+- Server-rendered HTML + SSE, Go only.
 - Sidebar of workspaces → sessions: status dots, new/close/delete/rename, multiple
   sessions concurrently (queued per server URL), transcripts persisted under
   `~/.kabby/sessions/` and resumable after restart; model-written session titles
@@ -421,7 +379,7 @@ func CommandOf(name string, args any) string | nil
   buttons, and require inspecting an interrupted command before retry.
 - Launching from home or a drive root opens the hub with an empty sidebar and a folder
   picker; from a real project, auto-starts a session.
-- Port conflict: EADDRINUSE → error with suggestion to pick another port; exit 1.
+- Port in use → error suggesting another port; exit 1.
 
 ### 3.10 Headless (`-p`)
 
@@ -435,7 +393,7 @@ func CommandOf(name string, args any) string | nil
 | Flag / env | Meaning |
 |---|---|
 | `[workspace]` | project folder; defaults to cwd |
-| `-m, --mode <ro|edit|bypass>` | permission mode |
+| `-m, --mode <ro\|edit\|bypass>` | permission mode |
 | `--model <name>` | pick model by partial name |
 | `--ctx <tokens>` | force context window (≥1024) |
 | `--verify <command>` | headless acceptance gate (requires `-p`) |
@@ -444,227 +402,186 @@ func CommandOf(name string, args any) string | nil
 | `--web [port]` | browser UI (default 7433) |
 | `-p, --print "<prompt>"` | headless: one prompt, exit |
 | `-h, --help` / `-v, --version` | help / version |
-| `KABBY_CONFIG` | alternate config path for tests |
+| `KABBY_CONFIG` | alternate config path (tests) |
 | `KABBY_KEEP_ALIVE` | Ollama keep-alive override (minutes) |
 | `OLLAMA_HOST` | Ollama base URL |
 | `OMLX_API_KEY` / `MTPLX_API_KEY` | fallback API keys |
 
-
 ---
 
-## 4. Step-by-step implementation (Go)
+## 4. Step-by-step implementation
 
-Replace npm tooling with Go tooling: `go mod init kabby`, `go build -o kabby
-./cmd/kabby`, `go test ./...`, `go vet ./...`. A `Makefile` (or `justfile`) may wrap
-these as `make build`, `make test`, `make dev`.
+Tooling: `make build` (`go build -o kabby ./cmd/kabby`), `make test`, `make vet`,
+`make prepublishOnly` (vet + test), `make cross` / `make release` (static binaries for
+every release target into `dist/`).
 
 ### Phase 0 — Project shell
 
-1. `go.mod`: module `kabby`, go `1.22`.
-2. `go.sum` (generated by `go mod tidy`).
-3. `Makefile`: targets `build`, `test`, `dev`, `clean`, `prepublishOnly` (runs
-   `go vet ./... && go test ./...`).
-4. `.gitignore`, `LICENSE` (MIT), `README.md` mirroring v0.7.1 usage with `kabby`.
-5. `cmd/kabby/main.go`: stub `parseArgs`, help/version, three run path placeholders.
-6. **AC:** `go build ./...` emits the `kabby` binary; `go test ./...` passes an empty
-   suite; `kabby --help` / `kabby --version` print.
+1. `go.mod` (module `kabby`), `go.sum`, `Makefile`, `.gitignore`, `LICENSE` (MIT),
+   `README.md`, `install.sh`.
+2. `cmd/kabby/main.go`: `parseArgs`, help/version, three run-path stubs.
+3. **AC:** `go build ./...` emits the binary; `go test ./...` passes; `kabby --help` /
+   `kabby --version` print.
 
 ### Phase 1 — Utilities and primitives
 
-1. `internal/util.go`: ANSI color helpers, `truncateMiddle(str, cap)`, small shared
-   types.
-2. `internal/events.go`: `EventBus` (subscribe/unsubscribe/emit typed events like
+1. `internal/util`: ANSI color helpers, `truncateMiddle(str, cap)`.
+2. `internal/events`: `EventBus` (subscribe/unsubscribe/emit typed events like
    `compaction`).
-3. `internal/ui.go`: `UI` type — `Println`/`Status`/`Warn`/`Error`/`Close`, no-op
-   close usable by TUI, web, headless.
-4. Tests: `internal/util_test.go` (truncate edge cases), `internal/events_test.go`
-   (fan-out, once semantics).
-5. **AC:** `go test ./...` green; truncate never exceeds cap; event order preserved.
+3. `internal/ui`: `UI` — `Println`/`Status`/`Warn`/`Error`/`Close`, no-op close
+   usable by TUI, web, and headless.
+4. Tests: `util_test.go` (truncate edge cases), `events_test.go` (fan-out, once
+   semantics).
+5. **AC:** truncate never exceeds cap; event order preserved.
 
 ### Phase 2 — Sandbox and file tools
 
-1. `internal/sandbox.go`: `ResolveInWorkspace(workspace, rel)` → abs path with traversal
-   rejection (`..`, absolute, symlink escape); `SandboxError` type; command reach-out
-   text classification.
-2. `internal/tools/fs.go`: `read_file` (paged: offset/limit, continuation line),
+1. `internal/sandbox`: `ResolveInWorkspace(workspace, rel)` with traversal rejection;
+   `SandboxError`; command reach-out text classification.
+2. `internal/tools/fs.go`: `read_file` (paged offset/limit + continuation line),
    `list_files` (folders end with `/`), `write_file` (mkdir parents), `edit_file`
    (exact old_text match → bounded error with source range + continuation args).
 3. Bound every tool output (per-tool cap + `TOOL_RESULT_CAP` 10k final).
-4. Tests: `internal/sandbox_test.go` (escape attempts, symlink sanity),
-   `internal/tools/edit_feedback_test.go` (failure message shape, pipeline exit codes).
-5. **AC:** no path escapes workspace; edit failure returns bounded source range.
+4. Tests: `sandbox_test.go` (escape attempts, symlink sanity),
+   `tools/edit_feedback_test.go` (failure message shape, pipeline exit codes).
+5. **AC:** no path escapes the workspace; edit failure returns a bounded source range.
 
 ### Phase 3 — Plan state
 
-1. `internal/plan.go`: exactly per §3.3 — `Set` (strip bullets, both separators, ≤20
-   steps), `MarkDone` (no index = current; reply restates next step), `Add`, `Show`,
-   `Checkpoint` (1–1000 chars replaces current step note), `ModelView`, `CompactLine`,
-   `PendingSummary`. Every action returns a small self-teaching string with an example.
-2. Wire the plan-reminder constant (attach after 4 non-plan calls with unfinished
-   work) for the agent loop.
-3. Tests: `internal/plan_test.go` (semicolon lists, numbered stripping, done/next
-   replies, checkpoint bounds, 20-step cap).
-4. **AC:** `Set` accepts both `\n` and `;` lists; `MarkDone` with no args advances the
-   current step; checkpoint rejects empty/>1000 chars.
+1. `internal/plan`: exactly per §3.3 and §2.1.
+2. Plan-reminder constant (after 4 non-plan calls with unfinished work) for the agent
+   loop.
+3. Tests: `plan_test.go` (semicolon lists, numbered stripping, done/next replies,
+   checkpoint bounds, 20-step cap).
+4. **AC:** `Set` accepts both `\n` and `;` lists; `MarkDone(nil)` advances the current
+   step; `Checkpoint` rejects empty/>1000 chars.
 
 ### Phase 4 — Shell and background tasks
 
 1. `internal/tools/shell.go`: `PickShell()` per OS; `RunCommand(command, workspace,
-   signal)` with cwd=workspace, 120 s timeout, upstream-preserved pipelines, beginning
-   + error-tail retention.
+   signal)` with cwd=workspace, 120 s timeout, upstream-preserved pipelines,
+   beginning + error-tail retention.
 2. `internal/tools/tasks.go`: `TaskManager` — `Start` (early output detection),
    `List`/`Logs`/`Stop`, ring-buffered output, `KillAll()` for exit + signals.
-3. Tests: `internal/tools/process_lifecycle_test.go`, `internal/tools/isolation_test.go`
-   (workspace confinement of spawned processes).
-4. **AC:** background task survives `ctrl+c` until explicit stop; `KillAll` stops all.
+3. Tests: `tools/process_lifecycle_test.go` (incl. workspace confinement of spawned
+   processes).
+4. **AC:** a background task survives `ctrl+c` until explicit stop; `KillAll` stops
+   all.
 
 ### Phase 5 — Tool registry and syntax check
 
-1. `internal/tools/check.go`: post-write parse check for Go/JS/JSON/HTML-inline-script/
-   Python (use `go/parser` for Go files; `encoding/json`, `html/template` or regexp for
-   others as appropriate).
-2. `internal/tools/index.go`: build the 4+4 `ToolSpec`s per mode with flat schemas and
-   example-call descriptions; `ExecuteTool` dispatch with per-request char cap;
-   `AfterWrite` hooks the syntax check; `CommandOf` exposes exec strings for the
-   approval gate.
-3. Tests: `internal/tools/check_test.go`; registry tests (ro sends exactly 4 tools;
-   edit sends 8).
-4. **AC:** ro mode tool list = exactly `[read_file, list_files, search, plan]`;
-   edit adds `write_file`, `edit_file`, `run_command`, `task`.
+1. `internal/tools/check.go`: post-write parse check per §3.3.
+2. `internal/tools/index.go`: `BuildToolSpecs`, `ExecuteTool` (per-request char cap),
+   `AfterWrite`, `CommandOf` per §2.1.
+3. Tests: `tools/check_test.go`, `tools/registry_test.go`.
+4. **AC:** `ro` tool list = exactly `[read_file, list_files, search, plan]`; `edit`
+   adds `write_file`, `edit_file`, `run_command`, `task`.
 
 ### Phase 6 — Providers
 
-1. `internal/providers/types.go`: `ToolSpec`, `Effort`, capability/model info.
-2. `internal/providers/transport.go`: `net/http` wrapper — silence/total timeouts
-   (3 min / 15 min), ≤3 transient retries with cancellable backoff, abort via
-   `context.Context`.
-3. `internal/providers/ollama.go` and `internal/providers/lmstudio.go` per §3.2
-   (chat + streaming with tools, usage anchoring, loaded-context query, effort
-   mapping). Stream parsing must buffer until complete before any tool call is
-   dispatched — no partial execution on truncated streams.
-4. `internal/providers/scheduler.go`: one inference slot per server URL; foreground
-   priority; background callers defer or cancel.
-5. Tests: `internal/providers/providers_test.go` with an `httptest.NewServer` stub
-   transport (stream parsing, tool-call extraction, no partial execution, effort
-   snapping).
-6. **AC:** a truncated stream never executes partial tool calls; effort `high` snaps to
-   the model's supported maximum.
+1. `internal/providers`: `types.go`, `transport.go`, `ollama.go`, `lmstudio.go`,
+   `scheduler.go` per §3.2 and invariant 2.
+2. Tests: `providers_test.go` with an `httptest.NewServer` stub (stream parsing,
+   tool-call extraction, no partial execution, effort snapping).
+3. **AC:** a truncated stream never executes partial tool calls; effort `high` snaps
+   to the model's supported maximum.
 
 ### Phase 7 — Discovery
 
-1. `internal/detect.go` (local candidates + docker + WSL/container gateways),
-   `internal/omlx.go`/`internal/mtplx.go` (health identities, settings-file port/key
-   reading), `internal/hosts.go`/`internal/network.go` (saved remote hosts, probes),
-   `internal/netscan.go` (on-demand TCP sweep, name round-trip).
-2. Tests: `internal/detect_test.go`, `internal/omlx_test.go`, `internal/mtplx_test.go`,
-   `internal/network_test.go` against recorded responses; port 8000 probed only on
-   local macOS (`runtime.GOOS == "darwin"`).
+1. `internal/detect`: `detect.go`, `omlx.go`, `mtplx.go`, `hosts.go`, `network.go`,
+   `netscan.go` per §3.1.
+2. Tests: `detect_test.go` against recorded responses; port 8000 probed only on local
+   macOS.
 3. **AC:** `/api/tags` identifies Ollama regardless of port; a dead address costs one
    timeout and never crashes startup.
 
 ### Phase 8 — Config and prompts
 
-1. `internal/config.go` per §3.7 (0600 handling, bypass reset to edit, key filtering,
-   `UpdateConfig` merge by re-reading).
-2. `internal/prompt.go`: system prompt per mode + chat-only variant + AGENTS.md
+1. `internal/config` per §3.7 (0600, bypass → edit, key filtering, re-read merge).
+2. `internal/prompt`: system prompt per mode + chat-only variant + AGENTS.md
    injection (8000-char cap).
-3. Tests: `internal/config/api_key_test.go`, `internal/prompt/chat_only_test.go`,
-   `internal/prompt/branding_test.go`; config round-trips against `KABBY_CONFIG`
-   scratch files.
-4. **AC:** config file mode 0600; saved `bypass` coerces to `edit` on load; AGENTS.md
-   truncated at 8000 chars.
+3. Tests: `config_test.go` (API keys, round-trips against `KABBY_CONFIG`),
+   `prompt_test.go` (chat-only, branding).
+4. **AC:** config file mode 0600; saved `bypass` loads as `edit`; AGENTS.md truncated
+   at 8000 chars.
 
 ### Phase 9 — Context management
 
-1. `internal/context.go`: budget math (§3.5), estimate calibration from observed usage,
-   tier-1 eviction with newest-group protection and read-stub replacement, tier-2
-   handover builder (facts first; narrative call on scheduler with thinking off and
-   caps), facts-only fallback, final fit gate.
-2. `internal/history.go`: transcript structure supporting group removal and marked
-   write-body records.
-3. Tests: `internal/context_test.go`, `internal/read_budget_test.go`,
-   `internal/history_test.go`, `internal/recovery_test.go` (equivalent-failure facts
-   compaction, repeat detection ignoring numbers/whitespace).
+1. `internal/context/context.go`: budget math (§3.5), estimate calibration, tier-1
+   eviction, tier-2 handover (on the scheduler, thinking off, capped), facts-only
+   fallback, final fit gate.
+2. `internal/context/history.go`: group removal, marked write-body records.
+3. Tests: `context_test.go` (budget, read budget, history, equivalent-failure
+   recovery, repeat detection ignoring numbers/whitespace).
 4. **AC:** budget math correct at 4k / 16k windows; eviction targets 60%; `/compact`
    below threshold still works; impossible window → actionable error.
 
 ### Phase 10 — Agent loop
 
-1. `internal/agent.go`: turn loop, tool batch execution with mode recheck, project
-   checks after edits and every 24 calls, `--verify` acceptance state machine (§3.6)
-   with evidence preservation and attempt budget, reminder nudges, per-turn stats
-   (`LastTurnStats`, `Outcome`, `VerificationResult`).
-2. Tests: `internal/agent_test.go` (happy path, repeated-tool recovery, acceptance
-   exhaustion → nonzero), `internal/verification_test.go` with scripted providers.
-3. **AC:** `--verify` acceptance passes → exit 0; chat-only model + `--verify` → exit
-   1 before first model call; equivalent failures trigger facts-only compaction.
+1. `internal/agent`: turn loop, tool batches with mode recheck, project checks, the
+   `--verify` state machine (§3.6), nudges, per-turn stats.
+2. Tests: `agent_test.go` with scripted providers (happy path, repeated-tool
+   recovery, acceptance pass/exhaustion).
+3. **AC:** acceptance passes → exit 0; chat-only model + `--verify` → exit 1 before
+   the first model call; equivalent failures trigger facts-only compaction.
 
 ### Phase 11 — Session glue + headless
 
-1. `internal/session.go`: model prep/selection by partial name, chat-only warnings,
-   effort advice, `NoBackendsMessage`, session line format.
-2. `cmd/kabby/main.go` headless arm: `parseArgs` (§3.11), `--verify` validation
-   (requires `-p`, rejects `--web`), signal cleanup, `[stats]` line on stderr, exit
-   codes, TUI-required terminal check.
-3. Tests: `internal/capability_test.go`; end-to-end `-p` against the stub model
-   (completed/incomplete exit semantics).
+1. `internal/session`: model prep/selection by partial name, chat-only warnings,
+   effort advice, `NoBackendsMessage`, session line.
+2. `cmd/kabby/main.go` headless arm: flag parsing (§3.11), `--verify` validation,
+   signal cleanup, `[stats]` on stderr, exit codes, TUI-requires-terminal check.
+3. Tests: `session_test.go`; end-to-end `-p` against the stub model.
 4. **AC:** `kabby -p "x" --verify "true"` exits 0; `kabby --verify "x"` without `-p`
    errors; `kabby -p "x" --web` errors.
 
 ### Phase 12 — Terminal TUI
 
-1. `tui/keys.go` + `tui/editor.go`: raw-mode input editor (word-wrapping input,
-   history), key semantics (`/`, `shift+tab`, `esc`, ctrl+c×2).
-2. `tui/tui.go`: render loop (logo via `internal/logo.go` or embedded, transcript
-   print, status line with context meter and task badges, slash menu + autocomplete,
-   approval prompt, esc-cancel mid-stream). `internal/session.go` binds slash commands,
-   model picker (local list, add-machine flow, network search/address), and the
-   no-local-server offer.
-3. Tests: `tui/tui_test.go` with a puppeted terminal (pty or pseudo-TTY).
+1. `tui/keys.go` + `tui/editor.go`: raw-mode input editor (wrapping, history), key
+   semantics per §3.8.
+2. `tui/tui.go`: render loop (logo, transcript, status line, slash menu +
+   autocomplete, approval prompt, esc-cancel mid-stream); `internal/session` binds
+   slash commands, the model picker, and the no-local-server offer.
+3. Tests: `tui_test.go` with a puppeted terminal.
 4. **AC:** `shift+tab` cycles ro → edit → bypass; `esc` cancels a running turn then
-   clears input; `ctrl+c`×2 quits; no local server → TUI opens with network-search
-   offer instead of an error dump.
+   clears input; `ctrl+c`×2 quits; no local server → network-search offer, not an
+   error dump.
 
 ### Phase 13 — Web hub
 
-1. `web/store.go` + config wiring: transcripts under `~/.kabby/sessions/`, hub record
-   for join-detection (`ReadHubRecord`/`PingHub`/`AskHubToOpen`).
-2. `web/hub.go`: HTTP + SSE server, token auth, workspace/session model, inference
-   slotting across sessions, `OpenSession`.
-3. `web/page.go`/`web/styles.go`/`web/client.go`: chat UI, markdown, sidebar, status,
-   model picker, approval buttons, `/`-commands parity.
-4. `web/terminal.go`, `web/attachments.go`: panel shell (no PTY), paste/drop/paperclip
-   with vision-capability warning; session restore rules (§3.9).
-5. Tests: `web/web_test.go`, `web/rename_test.go`, `web/attachments_test.go`,
-   `web/rtl_test.go`; plus browser bench scripts in `bench/`.
-6. **AC:** second `kabby --web` joins the running hub; port conflict suggests another
-   port; restored session retires stale approval buttons.
+1. `web/store.go`: transcripts under `~/.kabby/sessions/`, hub record for join
+   detection (`ReadHubRecord`/`PingHub`/`AskHubToOpen`).
+2. `web/hub.go`: HTTP + SSE, token auth, workspace/session model, inference slotting,
+   `OpenSession`, panel terminal (no PTY), attachments.
+3. `web/page.go`/`styles.go`/`client.go`: chat UI, markdown, sidebar, model picker,
+   approval buttons, `/`-command parity.
+4. Tests: `web_test.go` (token gate, resume, rename, attachments, RTL).
+5. **AC:** a second `kabby --web` joins the running hub; port conflict suggests
+   another port; a restored session retires stale approval buttons.
 
 ### Phase 14 — Benchmarks, docs, release
 
-1. `bench/run.sh` + scenario scripts (compact smoke, lifecycle, acceptance, browser
-   checks) keyed off the `[stats]` line.
-2. Update `README.md`, docs (`how-it-works.md`, `backend-notes.md`, audit/lifecycle
-   records), and this SPECS.md.
-3. **AC:** `prepublishOnly` = test suite; `go build -o kabby ./cmd/kabby` produces a
-   single binary; version bump + changelog.
+1. `bench/run.sh` scenarios (`mc-compact`, `lifecycle`, `acceptance`) keyed off the
+   `[stats]` line.
+2. Keep `README.md`, `docs/how-it-works.md`, `docs/backend-notes.md`, and this spec
+   current.
+3. **AC:** `make prepublishOnly` passes; `make cross` produces one static binary per
+   target.
 
 ---
 
-## 5. Test harness (§6 reference)
+## 5. Test harness
 
-For provider/model-server-dependent phases (6, 7, 10, 11), implement a **stub
-transport** in `internal/providers/testdata/` (or `test/`) using
-`net/http/httptest.NewServer` that:
+For model-server-dependent phases (6, 7, 10, 11), use an `httptest.NewServer` stub
+that:
 
 - returns canned `/api/tags`, `/api/v1/models`, `/health` responses,
 - streams a canned chat response with tool calls (optionally truncated mid-stream),
 - reports loaded context via Ollama `/api/ps`,
 - fails on demand (timeout, empty stream, context overflow).
 
-Recorded responses for discovery tests live in `internal/detect/testdata/` (one JSON
-file per backend/endpoint). Tests never touch the real `~/.kabby.json` — they use
-`KABBY_CONFIG` pointing at a temp file (`t.TempDir()`).
+Recorded discovery responses go in `internal/detect/testdata/` (one JSON file per
+backend/endpoint).
 
 ---
 
@@ -672,62 +589,48 @@ file per backend/endpoint). Tests never touch the real `~/.kabby.json` — they 
 
 | Area | Files | Non-negotiables |
 |---|---|---|
-| Sandbox | `internal/sandbox_test.go`, `internal/tools/isolation_test.go` | No escape via `..`, absolute paths, shell reach-out detection |
-| Context | `internal/context_test.go`, `internal/read_budget_test.go` | Budget math at 4k/16k, eviction targets 60%, handover caps |
-| Recovery | `internal/recovery_test.go` | Equivalent-failure detection, attempt limits respected |
-| Plan | `internal/plan_test.go` | Survival through compaction, ≤20 steps |
-| Providers | `internal/providers/providers_test.go` | No partial tool execution; effort snapping |
+| Sandbox | `sandbox/sandbox_test.go`, `tools/process_lifecycle_test.go` | No escape via `..`, absolute paths, symlinks; shell reach-out detection |
+| Context | `context/context_test.go` | Budget math at 4k/16k, eviction targets 60%, handover caps |
+| Recovery | `context/context_test.go`, `agent/agent_test.go` | Equivalent-failure detection, attempt limits respected |
+| Plan | `plan/plan_test.go` | Survives compaction, ≤20 steps |
+| Providers | `providers/providers_test.go` | No partial tool execution; effort snapping |
 | Web | `web/web_test.go` | Token-gated, transcript resume, approval retirement |
-| CLI | `internal/capability_test.go` | Flag validation, exit codes, `[stats]` shape |
+| CLI | `session/session_test.go`, `-p` end-to-end | Flag validation, exit codes, `[stats]` shape |
 
 ---
 
-## 7. Outstanding work (from TODO.md, restated as tasks)
+## 7. Outstanding work
 
-1. **Human pass on the terminal TUI** — drive logo, slash menu, shift+tab, pickers,
-   approval prompt, esc-cancel live on both Ollama and LM Studio; file findings in
-   `docs/`.
-2. **Plan persistence across sessions** — decide the store (workspace file vs
+1. **Close spec gaps found in the code** (as of v0.7.11):
+   - `KABBY_KEEP_ALIVE` is never read, and nothing sends Ollama `keep_alive` (§3.2).
+   - The TUI implements only `/help`, `/model`, and `/exit`; §3.8 lists the full set
+     (and names it `/models`).
+   - `internal/detect/testdata/` does not exist yet (§5).
+2. **Human pass on the terminal TUI** — drive the logo, slash menu, shift+tab,
+   pickers, approval prompt, and esc-cancel live on both Ollama and LM Studio; file
+   findings in `docs/`.
+3. **Plan persistence across sessions** — decide the store (workspace file vs
    `~/.kabby/`), schema (`{steps:[{text,done,note}]}`), and restore rules (offer,
    don't auto-load; `/clear` clears it). Reuses `Plan` untouched — the behavior is
    already exactly what web save/restore does.
-3. **Per-backend effort memory** — replace `config.effort` with
-   `effort: { ollama?: Effort, lmstudio?: Effort }`, migration `cfg.effort → both`,
-   keybind `/effort` writes only the active backend's slot; a must because LM Studio's
-   `high` snaps to `medium` while Ollama maps to "thinking on".
-4. **First release** — verify binary-only distribution, `go build` reproducibility,
-   `prepublishOnly` gate, tag `v0.7.1`.
+4. **Per-backend effort memory** — replace `config.effort` with
+   `effort: { ollama?: Effort, lmstudio?: Effort }`, migrating `cfg.effort` into both;
+   `/effort` writes only the active backend's slot. Needed because LM Studio's `high`
+   snaps to `medium` while Ollama maps it to "thinking on".
 
 ---
 
 ## 8. Release checklist
 
-- [ ] `go test ./...` green on Go 1.22 (and Go 1.21 if supported).
+- [ ] `make prepublishOnly` (vet + test) green.
 - [ ] Headless smoke on both backends: `bench/run.sh mc-compact <model> off --ctx 12000`
-    completes with the plan intact.
+      completes with the plan intact.
 - [ ] `[stats]` JSON line parses and carries the fields in §3.6.
 - [ ] No `bypass` mode persisted to `~/.kabby.json` after a bypass session.
-- [ ] Fresh-machine scenario: no server running → model picker offer, not an
-    error dump.
-- [ ] Single static binary per target (GOOS/GOARCH: linux/amd64, darwin/amd64,
-    darwin/arm64, windows/amd64) via `CGO_ENABLED=0 go build`; each runs on a clean
-    machine with no Go runtime installed.
+- [ ] Fresh machine, no server running → model-picker offer, not an error dump.
+- [ ] `make cross`: static binaries for linux/amd64, darwin/amd64, darwin/arm64,
+      windows/amd64; each runs on a clean machine with no Go installed.
+- [ ] Version bumped in `cmd/kabby/main.go`; tag `vX.Y.Z`; GitHub release carries the
+      binaries `install.sh` downloads.
 - [ ] `README.md` version-accurate (commands, options, ports table).
 - [ ] All Phase 0–14 ACs pass without a live model server.
-
----
-
-## 9. Decisions (answered)
-
-| Decision | Value |
-|---|---|
-| Go module path | `kabby` |
-| Minimum Go version | 1.22 |
-| Build-time dependencies | Third-party OK (compiled into static binary; e.g. bubbletea for TUI) |
-| Web UI | Server-rendered HTML + SSE, Go only |
-| Release targets | linux/amd64, darwin/amd64, darwin/arm64, windows/amd64 (`CGO_ENABLED=0`) |
-| Legacy SMOLCODER env aliases | Dropped (`KABBY_*` only) |
-| Config | `~/.kabby.json`, JSON, mode 0600 (unchanged from SPECS2.md) |
-| Testing | Go stdlib `testing` + `net/http/httptest` stubs |
-
-These decisions are now baked into SPECS.md; reopen this section if any needs revisiting.
