@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"kabby/internal/config"
 )
 
 func TestEditorInsertAndDelete(t *testing.T) {
@@ -148,7 +150,7 @@ func TestKeyParse(t *testing.T) {
 func TestTUIModeCycle(t *testing.T) {
 	in := bytes.NewReader(nil)
 	out := &bytes.Buffer{}
-	tui := NewTUI(in, out)
+	tui := NewTUI(in, out, "", "", "", nil, config.Config{})
 	if tui.mode != "edit" {
 		t.Fatalf("expected initial mode 'edit', got %s", tui.mode)
 	}
@@ -169,7 +171,7 @@ func TestTUIModeCycle(t *testing.T) {
 func TestTUIEnterSubmit(t *testing.T) {
 	in := bytes.NewReader([]byte("hello\n"))
 	out := &bytes.Buffer{}
-	tui := NewTUI(in, out)
+	tui := NewTUI(in, out, "", "", "", nil, config.Config{})
 
 	// Simulate key events directly instead of reading from stdin.
 	tui.edit.InsertRune('h')
@@ -191,7 +193,7 @@ func TestTUIEnterSubmit(t *testing.T) {
 func TestTUIEscClear(t *testing.T) {
 	in := bytes.NewReader(nil)
 	out := &bytes.Buffer{}
-	tui := NewTUI(in, out)
+	tui := NewTUI(in, out, "", "", "", nil, config.Config{})
 	tui.edit.InsertRune('a')
 	tui.edit.InsertRune('b')
 	tui.handleKey(Key{Code: "escape"})
@@ -203,7 +205,7 @@ func TestTUIEscClear(t *testing.T) {
 func TestTUIQuitCtrlC(t *testing.T) {
 	in := bytes.NewReader(nil)
 	out := &bytes.Buffer{}
-	tui := NewTUI(in, out)
+	tui := NewTUI(in, out, "", "", "", nil, config.Config{})
 	tui.handleKey(Key{Ctrl: true, Rune: 'c'})
 	if !tui.quit {
 		t.Fatal("expected quit on Ctrl+C")

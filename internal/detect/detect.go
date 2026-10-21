@@ -183,7 +183,8 @@ func mustAtoi(s string) int {
 // ProbeResult is the result of probing a single server address.
 type ProbeResult struct {
 	URL     string
-	Backend string // ollama | lmstudio | omlx | mtplx | ""
+	Backend string   // ollama | lmstudio | omlx | mtplx | ""
+	Models  []string // model names reported by the backend
 	Error   error
 }
 
@@ -195,14 +196,15 @@ func Probe(ctx context.Context, url string) ProbeResult {
 	// Try Ollama /api/tags.
 	if models, err := probeOllamaTags(ctx, url+"/api/tags"); err == nil {
 		result.Backend = "ollama"
+		result.Models = extractOllamaModelNames(models)
 		result.Error = nil
-		_ = models
 		return result
 	}
 
 	// Try LM Studio /api/v1/models.
-	if _, err := probeLMStudioModels(ctx, url+"/api/v1/models"); err == nil {
+	if models, err := probeLMStudioModels(ctx, url+"/api/v1/models"); err == nil {
 		result.Backend = "lmstudio"
+		result.Models = extractLMStudioModelNames(models)
 		return result
 	}
 
@@ -228,6 +230,44 @@ func probeOllamaTags(ctx context.Context, url string) ([]byte, error) {
 
 func probeLMStudioModels(ctx context.Context, url string) ([]byte, error) {
 	return getJSON(ctx, url)
+}
+
+// extractOllamaModelNames parses the /api/tags response and returns model names.
+func extractOllamaModelNames(data []byte) []string {
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &tags); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(tags.Models))
+	for _, m := range tags.Models {
+		if m.Name != "" {
+			names = append(names, m.Name)
+		}
+	}
+	return names
+}
+
+// extractLMStudioModelNames parses the /api/v1/models response and returns model IDs.
+func extractLMStudioModelNames(data []byte) []string {
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &models); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(models.Data))
+	for _, m := range models.Data {
+		if m.ID != "" {
+			names = append(names, m.ID)
+		}
+	}
+	return names
 }
 
 func probeHealth(ctx context.Context, url string) (string, error) {
@@ -265,18 +305,13 @@ func DiscoverLocal(ctx context.Context) []ProbeResult {
 		wg.Add(1)
 		go func(idx int, cand Candidate) {
 			defer wg.Done()
-			probeCtx := candCtx(ctx)
+			probeCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+			defer cancel()
 			results[idx] = Probe(probeCtx, cand.URL)
 		}(i, c)
 	}
 	wg.Wait()
 	return results
-}
-
-func candCtx(ctx context.Context) context.Context {
-	c, cancel := context.WithTimeout(ctx, ProbeTimeout)
-	defer cancel()
-	return c
 }
 
 // ioReadAll reads all bytes from a reader.

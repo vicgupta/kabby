@@ -35,37 +35,7 @@ type VerificationResult struct {
 
 // ChatClient is the interface the agent needs to talk to a model backend.
 type ChatClient interface {
-	Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, error)
-}
-
-// ChatRequest is a generic chat request sent to the backend.
-type ChatRequest struct {
-	Model         string
-	Messages      []ChatMessage
-	Tools         []providers.ToolSpec
-	ContextWindow int
-	Effort        string
-}
-
-// ChatMessage is a generic chat message.
-type ChatMessage struct {
-	Role    string
-	Content string
-}
-
-// ChatResult is a generic streaming result from the backend.
-type ChatResult struct {
-	Content    string
-	ToolCalls  []ToolCall
-	Done       bool
-	DoneReason string
-	Err        error
-}
-
-// ToolCall is a generic tool call.
-type ToolCall struct {
-	Name      string
-	Arguments map[string]any
+	Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error)
 }
 
 // Agent is the core read → edit → run → verify loop.
@@ -99,7 +69,7 @@ func NewAgent(client ChatClient, ctxManager *ctxmgr.Manager, p *plan.Plan, tc *t
 // RunTurn executes one full turn: system + history → model → execute tools → repeat.
 func (a *Agent) RunTurn(ctx context.Context, systemPrompt string, userPrompt string) (string, error) {
 	start := time.Now()
-	messages := []ChatMessage{
+	messages := []providers.ChatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -119,7 +89,7 @@ func (a *Agent) RunTurn(ctx context.Context, systemPrompt string, userPrompt str
 		toolSpecs := tools.BuildToolSpecs(mode)
 
 		// Call the model.
-		req := ChatRequest{
+		req := providers.ChatRequest{
 			Model:         a.Config.LastModel,
 			Messages:      messages,
 			Tools:         toolSpecs,
@@ -132,7 +102,7 @@ func (a *Agent) RunTurn(ctx context.Context, systemPrompt string, userPrompt str
 		}
 
 		// Process streaming results.
-		var toolCalls []ToolCall
+		var toolCalls []providers.ToolCall
 		var content strings.Builder
 		for result := range results {
 			if result.Err != nil {
@@ -156,12 +126,12 @@ func (a *Agent) RunTurn(ctx context.Context, systemPrompt string, userPrompt str
 			result, err := tools.ExecuteTool(tc.Name, tc.Arguments, a.ToolsCtx, ctx.Done())
 			if err != nil {
 				// Feed the error back as a tool result.
-				messages = append(messages, ChatMessage{Role: "assistant", Content: ""})
-				messages = append(messages, ChatMessage{Role: "tool", Content: fmt.Sprintf("error: %v", err)})
+				messages = append(messages, providers.ChatMessage{Role: "assistant", Content: ""})
+				messages = append(messages, providers.ChatMessage{Role: "tool", Content: fmt.Sprintf("error: %v", err)})
 				continue
 			}
-			messages = append(messages, ChatMessage{Role: "assistant", Content: ""})
-			messages = append(messages, ChatMessage{Role: "tool", Content: result})
+			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: ""})
+			messages = append(messages, providers.ChatMessage{Role: "tool", Content: result})
 		}
 	}
 

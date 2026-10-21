@@ -7,17 +7,18 @@ import (
 	"kabby/internal/config"
 	ctxmgr "kabby/internal/context"
 	"kabby/internal/plan"
+	"kabby/internal/providers"
 	"kabby/internal/tools"
 )
 
 // stubClient returns canned responses without calling a real model.
 // On each call it returns the next response in the list.
 type stubClient struct {
-	responses [][]ChatResult // responses per call
+	responses [][]providers.ChatResult // responses per call
 	callIndex int
 }
 
-func (s *stubClient) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResult, error) {
+func (s *stubClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
 	idx := s.callIndex
 	if idx >= len(s.responses) {
 		idx = len(s.responses) - 1
@@ -25,11 +26,11 @@ func (s *stubClient) Chat(ctx context.Context, req ChatRequest) (<-chan ChatResu
 	s.callIndex++
 
 	resps := s.responses[idx]
-	out := make(chan ChatResult, len(resps)+1)
+	out := make(chan providers.ChatResult, len(resps)+1)
 	for _, r := range resps {
 		out <- r
 	}
-	out <- ChatResult{Done: true}
+	out <- providers.ChatResult{Done: true}
 	close(out)
 	return out, nil
 }
@@ -48,7 +49,7 @@ func newTestAgent(t *testing.T) *Agent {
 
 func TestAgentRunTurnNoTools(t *testing.T) {
 	a := newTestAgent(t)
-	a.Client.(*stubClient).responses = [][]ChatResult{
+	a.Client.(*stubClient).responses = [][]providers.ChatResult{
 		{{Content: "Hello, world!"}},
 	}
 	answer, err := a.RunTurn(context.Background(), "You are a helper.", "Say hi")
@@ -62,11 +63,11 @@ func TestAgentRunTurnNoTools(t *testing.T) {
 
 func TestAgentRunTurnWithTools(t *testing.T) {
 	a := newTestAgent(t)
-	a.Client.(*stubClient).responses = [][]ChatResult{
+	a.Client.(*stubClient).responses = [][]providers.ChatResult{
 		{
 			{
 				Content: "",
-				ToolCalls: []ToolCall{
+				ToolCalls: []providers.ToolCall{
 					{Name: "read_file", Arguments: map[string]any{"path": "README.md"}},
 				},
 			},

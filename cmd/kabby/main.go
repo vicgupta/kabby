@@ -120,7 +120,7 @@ func run(args []string) int {
 	case *print != "":
 		return runHeadless(*print, workspace, *model, *verify, *ctx, *verifyAttempts)
 	default:
-		return runTUI(workspace)
+		return runTUI(workspace, *model, *ctx)
 	}
 }
 
@@ -148,14 +148,20 @@ func runHeadless(prompt, workspace, modelFlag, verify string, ctxFlag int, attem
 	var backends []providers.ModelInfo
 	for _, r := range results {
 		if r.Backend != "" {
-			backends = append(backends, providers.ModelInfo{
-				ID:             r.URL,
-				Name:           r.URL,
-				Backend:        r.Backend,
-				URL:            r.URL,
-				ToolsSupported: true,
-				ContextWindow:  4096,
-			})
+			models := r.Models
+			if len(models) == 0 {
+				models = []string{r.URL} // fallback to URL
+			}
+			for _, m := range models {
+				backends = append(backends, providers.ModelInfo{
+					ID:             m,
+					Name:           m,
+					Backend:        r.Backend,
+					URL:            r.URL,
+					ToolsSupported: true,
+					ContextWindow:  4096,
+				})
+			}
 		}
 	}
 
@@ -256,9 +262,72 @@ func runCommandSimple(cmd, workspace string) bool {
 	return false
 }
 
-// runTUI starts the raw-mode terminal UI.
-func runTUI(workspace string) int {
-	if err := tui.RunStdin(); err != nil {
+// runTUI starts the raw-mode terminal UI, discovers local model servers,
+// assigns a default model, and connects the TUI to the agent loop.
+func runTUI(workspace string, modelFlag string, ctxFlag int) int {
+	// Load config (respects KABBY_CONFIG).
+	config.SetConfigPath(os.Getenv("KABBY_CONFIG"))
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: config: %v\n", err)
+		return 1
+	}
+
+	// Discover local servers (TUI never sweeps network).
+	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	results := detect.DiscoverLocal(reqCtx)
+
+	var backends []providers.ModelInfo
+	for _, r := range results {
+		if r.Backend != "" {
+			models := r.Models
+			if len(models) == 0 {
+				models = []string{r.URL} // fallback to URL
+			}
+			for _, m := range models {
+				backends = append(backends, providers.ModelInfo{
+					ID:             m,
+					Name:           m,
+					Backend:        r.Backend,
+					URL:            r.URL,
+					ToolsSupported: true,
+					ContextWindow:  4096,
+				})
+			}
+		}
+	}
+
+	if len(backends) == 0 {
+		fmt.Fprintln(os.Stderr, "error: "+session.NoBackendsMessage())
+		return 1
+	}
+
+	// Select model: use lastModel+lastModelUrl if it matches, else first backend.
+	chosen, err := session.PrepareModel(session.SessionPrefs{
+		Model: modelFlag,
+		CTX:   ctxFlag,
+	}, cfg, backends)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "kabby: discovered %s at %s, model %s\n", chosen.Backend, chosen.URL, chosen.ID)
+
+	// Build a real provider client for the discovered backend.
+	var client agent.ChatClient
+	switch chosen.Backend {
+	case "ollama":
+		client = providers.NewOllama(chosen.URL, providers.NewTransport())
+	case "lmstudio":
+		client = providers.NewLMStudio(chosen.URL, providers.NewTransport())
+	default:
+		client = providers.NewOllama(chosen.URL, providers.NewTransport())
+	}
+
+	tuiApp := tui.NewTUI(os.Stdin, os.Stdout, chosen.ID, chosen.Backend, chosen.URL, client, cfg)
+	if err := tuiApp.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
@@ -297,9 +366,9 @@ Env:
 // stubChatClient is a temporary stub used until real provider wiring is done.
 type stubChatClient struct{}
 
-func (s *stubChatClient) Chat(ctx context.Context, req agent.ChatRequest) (<-chan agent.ChatResult, error) {
-	out := make(chan agent.ChatResult, 1)
-	out <- agent.ChatResult{Content: "stub response: " + req.Messages[len(req.Messages)-1].Content, Done: true}
+func (s *stubChatClient) Chat(ctx context.Context, req providers.ChatRequest) (<-chan providers.ChatResult, error) {
+	out := make(chan providers.ChatResult, 1)
+	out <- providers.ChatResult{Content: "stub response: " + req.Messages[len(req.Messages)-1].Content, Done: true}
 	close(out)
 	return out, nil
 }
