@@ -93,7 +93,7 @@ func (t *TUI) Run() error {
 	}()
 
 	// Show startup banner (no screen clearing, just append).
-	t.write(fmt.Sprintf("kabby v0.7.9 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
+	t.write(fmt.Sprintf("kabby v0.7.10 · backend: %s · mode: %s · model: %s\r\n", t.backend, t.mode, t.model))
 	t.write("Type /help for commands, /exit to quit.\r\n")
 
 	// Print the initial prompt.
