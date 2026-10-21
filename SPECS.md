@@ -607,6 +607,10 @@ backend/endpoint).
    - The TUI implements only `/help`, `/model`, `/stream`, and `/exit`; §3.8 lists the full set
      (and names it `/models`).
    - `internal/detect/testdata/` does not exist yet (§5).
+   - The TUI bypasses the agent loop: `tui.submit` calls the model directly with no
+     tools and no history, so the terminal is chat-only (§3.6, §3.8).
+   - `web.TestStoreList` is flaky (about 2 runs in 5 fail cleaning up `t.TempDir()`:
+     "directory not empty").
 2. **Human pass on the terminal TUI** — drive the logo, slash menu, shift+tab,
    pickers, approval prompt, and esc-cancel live on both Ollama and LM Studio; file
    findings in `docs/`.
@@ -618,6 +622,69 @@ backend/endpoint).
    `effort: { ollama?: Effort, lmstudio?: Effort }`, migrating `cfg.effort` into both;
    `/effort` writes only the active backend's slot. Needed because LM Studio's `high`
    snaps to `medium` while Ollama maps it to "thinking on".
+
+### 7.1 Proposed features
+
+Each item is adapted to kabby's goals (small local models, zero
+config, privacy). None is implemented yet. Suggested order: F5 → F4 → F2 → the
+TUI/agent-loop gap in item 1 → F1 → F3, then the rest as needed. F1, F3, and F7 depend
+on the TUI running through the agent loop.
+
+**Strong fits**
+
+- **F1. Steering.** Input typed during a running turn goes into a queue. After each
+  tool call finishes, the agent skips the remaining calls in the batch, appends the
+  queued message, and calls the model again. Unlike `esc`, the turn keeps its
+  progress. Requires the TUI to read keys while a turn runs. *Medium.*
+- **F2. `/btw <question>`.** Answer a side question using the current context
+  without appending the question or the answer to history, so small windows don't
+  spend budget on asides. *Small.*
+- **F3. Tool hooks.** An optional external process, exchanging JSON over stdio, is
+  consulted at `before_tool`, `after_tool`, and `approve_tool`. It can return
+  `continue`, `modify`, `deny_tool`, `respond` (supply the tool result and skip
+  execution, which enables plugin tools without growing the built-in eight), or
+  `abort_turn`. Off unless configured. *Medium.*
+- **F4. Secret filtering in tool results.** Before a tool result reaches the model,
+  replace every known secret (keys in `~/.kabby.json`, `OMLX_API_KEY`,
+  `MTPLX_API_KEY`) with `[FILTERED]`, using a `strings.Replacer` built once at
+  startup and skipping results shorter than 8 chars. *Small.*
+- **F5. Slash-command registry.** Each command is defined once (name, description,
+  usage, handler); `/help`, slash-menu autocomplete, and web `/`-command parity are
+  generated from the registry. Do this before adding the missing §3.8 commands.
+  *Small refactor.*
+- **F6. Workspace `MEMORY.md`.** A long-term notes file next to `AGENTS.md` that the
+  agent can append to, loaded into message[0] under its own char cap. Share the
+  storage decision with plan persistence (item 3). *Small.*
+
+**Good fits, with caveats**
+
+- **F7. Light/heavy routing across local models.** Choose between a configured fast
+  model and the main model from structural features only, never keywords: message
+  length, fenced code blocks, recent tool calls, conversation depth, attachments.
+  Caveat: switching models reloads them on Ollama and LM Studio, so route only when
+  both are already loaded. *Medium.*
+- **F8. Recall of evicted context.** Tier-1 eviction moves dropped messages to a
+  per-session store instead of discarding them, and a single `recall` tool fetches
+  them by search or ID. Offer the tool only when the window is ≥16k, to keep the tool
+  list small for small models. *Medium-large.*
+- **F9. Skills.** `SKILL.md` folders in `.kabby/skills/` and `~/.kabby/skills/`. Only
+  names and one-line descriptions enter the system prompt, under a hard size cap;
+  the full text loads on demand or via `/use <skill>`. *Medium.*
+- **F10. Opt-in process isolation (`--isolate`).** Run `run_command` and `task`
+  children under bubblewrap on Linux, `sandbox-exec` on macOS, and a restricted token
+  plus Job Object on Windows, with `HOME`/`TMPDIR`/XDG dirs redirected. This relaxes
+  the §1.4 "no OS isolation" non-goal, so it stays opt-in and default behavior is
+  unchanged. *Medium, mostly per-platform testing.*
+
+**Considered and rejected**
+
+- Chat-app channels, cloud providers, OAuth: conflict with the local-only privacy
+  goal (§1.3).
+- Subagents: a §1.4 non-goal.
+- Self-evolution (auto-written skills from past turns): with small models, an easy
+  path for bad instructions to persist in the prompt.
+- MCP client and cron: MCP tools would swamp the small tool list (F3 covers most
+  plugin needs); cron doesn't fit a per-project coding agent.
 
 ---
 
